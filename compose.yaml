@@ -1,0 +1,46 @@
+name: vault
+
+services:
+  vaultwarden:
+    image: vaultwarden/server:1.35.8-alpine
+    container_name: vault-app
+    restart: unless-stopped
+    # Secrets (ADMIN_TOKEN, DOMAIN, SIGNUPS_ALLOWED) injected from this file.
+    # The argon2 hash contains '$' chars — env_file avoids compose interpolation.
+    env_file:
+      - ${VAULT_ENV_FILE:-./env.local}
+    environment:
+      WEBSOCKET_ENABLED: "true"
+      SENDS_ALLOWED: "true"
+      EMERGENCY_ACCESS_ALLOWED: "true"
+      LOG_FILE: /data/vaultwarden.log
+      LOG_LEVEL: warn
+      EXTENDED_LOGGING: "true"
+      EVENTS_DAYS_RETAIN: "90"
+      TZ: Asia/Seoul
+    volumes:
+      - ./data:/data
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/alive"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: vault-caddy
+    restart: unless-stopped
+    depends_on:
+      - vaultwarden
+    ports:
+      - "127.0.0.1:8222:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy-data:/data

@@ -1,0 +1,24 @@
+# Vaultwarden data — NEVER commit
+data/
+caddy-data/
+
+# Local secrets fallback (real secrets live in ~/.config/vault/.env)
+env.local
+.env
+.env.*
+
+# Backups — content goes to ~/backups/vault/, never under repo
+backups/
+
+# GPG keys
+*.gpg
+*.asc
+*.key
+
+# macOS noise
+.DS_Store
+
+# Editor noise
+.vscode/
+.idea/
+*.swp

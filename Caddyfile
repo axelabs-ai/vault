@@ -1,0 +1,4 @@
+:80 {
+	reverse_proxy vault-app:80
+	encode zstd gzip
+}
