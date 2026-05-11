@@ -28,10 +28,17 @@ trap 'fail "aborted on line $LINENO"' ERR
 
 log "begin backup $TODAY"
 
-# 1) SQLite — .backup (WAL-safe checkpoint)
-docker exec vault-app sqlite3 /data/db.sqlite3 ".backup '/data/backup.sqlite3'"
-docker cp vault-app:/data/backup.sqlite3 "$STAGE/db.sqlite3"
-docker exec vault-app rm /data/backup.sqlite3
+# 1) SQLite — use Vaultwarden's built-in backup (WAL-safe).
+# `/vaultwarden backup` writes data/db_YYYYMMDD_HHMMSS.sqlite3 inside the container.
+# Older bootstrap docs assumed a sqlite3 CLI in the image, but vaultwarden:*-alpine
+# does NOT ship sqlite3. The built-in subcommand is the supported path.
+docker exec vault-app /vaultwarden backup >/dev/null
+SNAPSHOT=$(docker exec vault-app sh -c 'ls -1t /data/db_*.sqlite3 2>/dev/null | head -1')
+if [[ -z "$SNAPSHOT" ]]; then
+  fail "vaultwarden backup snapshot not found"
+fi
+docker cp "vault-app:$SNAPSHOT" "$STAGE/db.sqlite3"
+docker exec vault-app rm "$SNAPSHOT"
 log "sqlite ok ($(du -h "$STAGE/db.sqlite3" | awk '{print $1}'))"
 
 # 2) attachments / sends / config

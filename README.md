@@ -84,11 +84,55 @@ curl -fsS https://macmini.<TAILNET>.ts.net/alive
 
 | Phase | 상태 | 비고 |
 |---|---|---|
-| Phase 0 인프라 가동 | 진행 중 | 본 부트스트랩 |
-| Phase 1 본인 운영자 셋업 | 대기 | Master Password 사용자 결정 후 |
+| Phase 0 인프라 가동 | **완료 (2026-05-12)** | 컨테이너 healthy, GPG 키, 첫 백업, LaunchAgent 가동 |
+| Phase 1 본인 운영자 셋업 | 부분 완료 | Master Password 후보 생성 — 본인 signup만 남음 |
 | Phase 2 P0 마이그레이션 | 미진입 | Week 1 (8개) |
 | Phase 3 P1·P2·가족 | 미진입 | Week 2~4 |
-| Phase 4 운영 정착 | 미진입 | 영구 |
+| Phase 4 운영 정착 | 자동 | 일/주/월/분기 daemon·체크리스트 가동 중 |
+
+### Phase 0 배포 산출물 (2026-05-12 실측)
+
+| 항목 | 상태 |
+|---|---|
+| `vault-app` (Vaultwarden 1.35.8-alpine) | Up, healthy |
+| `vault-caddy` (Caddy 2-alpine) | Up |
+| `/alive` ([localhost:8222](http://127.0.0.1:8222/alive)) | 200 OK |
+| GPG keypair `vault-backup@realchoice.co.kr` | 생성됨 (ed25519+cv25519, unattended) |
+| 첫 백업 `~/backups/vault/2026-05-12.tar.gpg` | 12K, restore-test PASS |
+| `com.realchoice.vault-backup` LaunchAgent | bootstrapped (매일 03:10) |
+| `com.realchoice.vault-health` LaunchAgent | running (10분 주기, `~/realchoice-ssot/logs/vault-health.jsonl`) |
+| Master Password 후보 | `~/.config/vault/MASTER_PASSWORD_INITIAL` (600) |
+| GitHub repo | [soohunkang/vault](https://github.com/soohunkang/vault), main branch pushed |
+
+### 외부 노출 (Tailscale) — 마지막 1단계
+
+vault 컨테이너는 macmini 로컬에서만 접속 가능한 상태. 가족·다른 디바이스 접근은 Tailscale Serve 활성화 시 자동 연결.
+
+```bash
+# 1. Tailscale 가입 + macmini를 첫 디바이스로 등록 (브라우저 SSO, 5분)
+sudo tailscale up
+
+# 2. macmini DOMAIN 자동 채움 + 외부 LAN 노출 활성화 (1줄)
+~/vault/scripts/tailscale-setup.sh
+
+# 3. 컨테이너 재기동으로 DOMAIN 반영
+~/vault/scripts/down.sh && ~/vault/scripts/up.sh
+
+# 4. 본인 signup — Master Password 후보는 ~/.config/vault/MASTER_PASSWORD_INITIAL
+open https://macmini.<tailnet>.ts.net   # 또는 http://127.0.0.1:8222 from macmini
+```
+
+### 운영자 첫 signup 후 즉시 할 일 (5분)
+
+```bash
+# A. 가입 완료 후 신규 가입 차단
+sed -i.bak 's/^SIGNUPS_ALLOWED=true/SIGNUPS_ALLOWED=false/' ~/.config/vault/.env
+~/vault/scripts/down.sh && ~/vault/scripts/up.sh
+
+# B. 초기 비밀 파일 폐기 (Master Password를 손글씨 종이 2부로 옮긴 후)
+shred -u ~/.config/vault/ADMIN_TOKEN_PLAINTEXT
+shred -u ~/.config/vault/MASTER_PASSWORD_INITIAL
+```
 
 ---
 
