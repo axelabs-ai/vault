@@ -109,3 +109,24 @@ curl -fsS https://macmini.<TAILNET>.ts.net/alive
 - `~/SHARED-CONTEXT/topology.md` — 전체 토폴로지 (Phase 0 완료 시 vault 추가)
 - `~/SHARED-CONTEXT/secrets-policy.md` — secrets git 정책
 - `~/SHARED-CONTEXT/daemons-registry.md` — LaunchAgent 등록부
+
+---
+
+## Security
+
+이 repo는 secret leak을 차단하는 pre-commit 훅과 weekly CVE 체크를 포함한다.
+
+```bash
+# 1. clone 직후 한 번만 — pre-commit 훅 활성화
+git config core.hooksPath .githooks
+
+# 2. (선택) 전체 repo 스캔
+./scripts/precommit-secret-scan.sh --all
+
+# 3. Vaultwarden 신규 릴리스 / 권고 점검 (weekly LaunchAgent용)
+./scripts/cve-check.sh
+```
+
+훅이 차단하는 패턴: Argon2id 해시, `master.*password=…`, B2 keyID (`K` + 20자리),
+Slack webhook, PEM private key, AWS / GitHub 토큰, 고엔트로피 문자열. 검증된 라인은
+`# pragma: allowlist secret` 주석으로 예외 가능. 규칙 정의는 `.gitleaks.toml`.

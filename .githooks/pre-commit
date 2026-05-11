@@ -1,0 +1,33 @@
+#!/bin/bash
+# vault pre-commit hook — block commits that contain secrets.
+# Activate once per clone:   git config core.hooksPath .githooks
+
+set -u
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SCANNER="${REPO_ROOT}/scripts/precommit-secret-scan.sh"
+
+if [ ! -x "$SCANNER" ]; then
+  echo "pre-commit: scanner missing or not executable: $SCANNER" >&2
+  echo "             run: chmod +x $SCANNER" >&2
+  exit 1
+fi
+
+if ! "$SCANNER" --staged; then
+  cat >&2 <<'EOF'
+
+vault pre-commit: secrets detected in staged content.
+
+Options:
+  1. Unstage the offending file:   git restore --staged <file>
+  2. Redact the secret and re-stage.
+  3. Annotate a verified-safe line with:  # pragma: allowlist secret
+  4. As an emergency override (NOT recommended): git commit --no-verify
+
+Never commit Argon2id hashes, .env contents, ADMIN_TOKEN plaintext,
+GPG private keys, B2 keyIDs, or *.tar.gpg archives.
+EOF
+  exit 1
+fi
+
+exit 0

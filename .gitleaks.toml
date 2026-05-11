@@ -1,0 +1,83 @@
+# gitleaks configuration for vault repo
+# Docs: https://github.com/gitleaks/gitleaks
+# Goal: never leak Argon2id hashes, .env plaintext, ADMIN_TOKEN plaintext,
+# GPG private keys, B2 keys, .tar.gpg archives, or Slack webhooks.
+
+title = "vault gitleaks config"
+
+# Extend default ruleset (AWS, GitHub PAT, RSA private key, etc. ship out of the box).
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Custom rules
+# ---------------------------------------------------------------------------
+
+[[rules]]
+id          = "argon2id-hash"
+description = "Argon2id PHC-format hash (used for Vaultwarden ADMIN_TOKEN)"
+regex       = '''\$argon2id\$v=\d+\$m=\d+,t=\d+,p=\d+\$[\w+/]+\$[\w+/]+'''
+tags        = ["secret", "argon2id", "vaultwarden"]
+
+[[rules]]
+id          = "bitwarden-master-password"
+description = "Heuristic: a long master-password assignment"
+regex       = '''(?i)master.*password.*=.{12,}'''
+tags        = ["secret", "bitwarden", "heuristic"]
+
+[[rules]]
+id          = "backblaze-b2-keyid"
+description = "Backblaze B2 keyID (starts with K + 20 digits)"
+regex       = '''\bK\d{20}\b'''
+tags        = ["secret", "backblaze", "b2"]
+
+[[rules]]
+id          = "slack-webhook"
+description = "Slack incoming webhook URL"
+regex       = '''https://hooks\.slack\.com/services/\w+/\w+/\w+'''
+tags        = ["secret", "slack", "webhook"]
+
+[[rules]]
+id          = "generic-high-entropy"
+description = "Generic high-entropy secret-like string"
+regex       = '''[A-Za-z0-9+/=_\-]{32,}'''
+entropy     = 4.5
+tags        = ["secret", "entropy"]
+
+[[rules]]
+id          = "rsa-private-key-block"
+description = "PEM-encoded RSA / OpenPGP / OpenSSH private key block"
+regex       = '''-----BEGIN (RSA |OPENSSH |PGP |EC |DSA |ENCRYPTED )?PRIVATE KEY( BLOCK)?-----'''
+tags        = ["secret", "private-key"]
+
+[[rules]]
+id          = "aws-access-key-id"
+description = "AWS access key ID"
+regex       = '''\b(AKIA|ASIA)[0-9A-Z]{16}\b'''
+tags        = ["secret", "aws"]
+
+[[rules]]
+id          = "github-pat"
+description = "GitHub personal access token (classic + fine-grained)"
+regex       = '''\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b'''
+tags        = ["secret", "github"]
+
+# ---------------------------------------------------------------------------
+# Allowlist
+# ---------------------------------------------------------------------------
+
+[allowlist]
+description = "vault repo allowlist — public artefacts only"
+paths = [
+  '''vault-backup\.pub\.asc$''',           # public GPG key, safe by design
+  '''^README\.md$''',                      # repo docs describe (not contain) patterns
+  '''^docs/.*\.md$''',                     # documentation may quote redacted samples
+  '''\.gitleaks\.toml$''',                 # this config contains regex literals
+  '''scripts/precommit-secret-scan\.sh$''',# scanner re-implements the regex
+  '''scripts/cve-check\.sh$''',            # CVE script mentions URLs/identifiers
+  '''\.githooks/pre-commit$''',            # hook mentions Argon2id by name
+  '''^scripts/wordlists/.*$'''             # public Diceware wordlists (EFF + Korean nouns)
+]
+regexes = [
+  '''pragma: allowlist secret''',         # explicit per-line opt-out
+]

@@ -1,0 +1,258 @@
+# ~/vault/migration/accounts.yaml
+# 계정 마이그레이션 SoT — Vault 이전 + 비번 회전 작업 인벤토리
+# 부트스트랩 §7.1 참조. 총 20개 계정, 4주에 걸쳐 P0/P1/P2로 진행.
+#
+# 상태 추적: ~/vault/migration/state/<id>.done touch-file
+# 도미노 회피: §7.4 — 같은 카테고리(marketplace/ads) 동일 일자에 2개 이상 회전 금지.
+#
+# 필드 정의:
+#   id                   — 파일/스크립트에서 쓸 slug
+#   name                 — 한국어 표시명
+#   url                  — 로그인 시작점
+#   category             — marketplace / ads / banking / saas / social / government / payment
+#   has_api              — API 자격증명 동반 여부(쿠팡·네이버·메타 등)
+#   api_secret_location  — ssot_secrets 키 경로(있을 때만)
+#   owner                — ops / mkt / admin
+#   impact_on_rotation   — 회전 윈도 중 발생 가능한 영향
+#   notes                — 회전 타이밍/주의사항
+
+migrations:
+
+  # ─────────────────────────────────────────
+  # P0 — Week 1, SLA 1주
+  # ─────────────────────────────────────────
+  - tier: p0
+    week: 1
+    sla: 1-week
+    accounts:
+      - id: coupang-wing
+        name: 쿠팡 윙
+        url: https://wing.coupang.com
+        category: marketplace
+        has_api: true
+        api_secret_location: ssot_secrets.coupang_wing
+        owner: ops
+        impact_on_rotation: 매출 직결, 자동화 stop possible during rotation window
+        notes: 평일 오전 권장, 쿠팡 정산일(매주 화·금) 회피
+
+      - id: coupang-openapi
+        name: 쿠팡 OPEN API
+        url: https://developers.coupangcorp.com
+        category: marketplace
+        has_api: true
+        api_secret_location: ssot_secrets.coupang_openapi
+        owner: ops
+        impact_on_rotation: 주문/재고 sync 일시 중단 가능
+        notes: 윙과 동일 일자 회전 금지(도미노 §7.4). 윙 다음 영업일 권장.
+
+      - id: naver-smartstore
+        name: 네이버 스마트스토어
+        url: https://sell.smartstore.naver.com
+        category: marketplace
+        has_api: true
+        api_secret_location: ssot_secrets.naver_smartstore
+        owner: ops
+        impact_on_rotation: 매출 직결, 주문 수집 일시 중단
+        notes: 네이버 정산일(매주 월) 회피. 2FA OTP 필수.
+
+      - id: naver-searchad
+        name: 네이버 검색광고
+        url: https://searchad.naver.com
+        category: ads
+        has_api: true
+        api_secret_location: ssot_secrets.naver_searchad
+        owner: mkt
+        impact_on_rotation: 광고 보고서 수집 중단, 입찰 자동화 영향
+        notes: 광고 라이브 시간(평일 9~18시) 회피. 새벽/야간 회전.
+
+      - id: meta-ads
+        name: 메타광고 (Facebook/Instagram Ads)
+        url: https://business.facebook.com
+        category: ads
+        has_api: true
+        api_secret_location: ssot_secrets.meta_ads
+        owner: mkt
+        impact_on_rotation: 광고 집행/수집 중단, 캠페인 일시 정지 가능
+        notes: 시스템 사용자 토큰 동시 회전. magnet MCP 서버 재시작 필요.
+
+      - id: google-workspace
+        name: 구글 (Workspace 관리자)
+        url: https://admin.google.com
+        category: saas
+        has_api: false
+        api_secret_location: null
+        owner: admin
+        impact_on_rotation: SSO 전면 영향 — 모든 구글 로그인 재인증 필요
+        notes: 백업 코드 사전 다운로드 필수. 본인 계정 last로.
+
+      - id: paylink
+        name: 페이링크
+        url: https://www.paylink.kr
+        category: payment
+        has_api: false
+        api_secret_location: null
+        owner: ops
+        impact_on_rotation: 결제 링크 발급 일시 중단
+        notes: 영업일 오전. 2FA SMS 가능성 확인.
+
+      - id: innopay
+        name: 이노페이
+        url: https://www.innopay.co.kr
+        category: payment
+        has_api: false
+        api_secret_location: null
+        owner: ops
+        impact_on_rotation: PG 정산 조회 일시 중단
+        notes: 영업일 오전. 사업자 인증서 로그인 옵션 확인.
+
+  # ─────────────────────────────────────────
+  # P1 — Week 2, SLA 2주
+  # 부트스트랩 §7.1에서 6개 카운트 vs 리스트 7개 → SGI는 P1.5로 강등
+  # ─────────────────────────────────────────
+  - tier: p1
+    week: 2
+    sla: 2-week
+    accounts:
+      - id: ms365
+        name: MS365
+        url: https://admin.microsoft.com
+        category: saas
+        has_api: false
+        api_secret_location: null
+        owner: admin
+        impact_on_rotation: 메일/오피스 재로그인 필요
+        notes: 백업 코드 사전 확보. 모바일 Authenticator 우선.
+
+      - id: instagram-1
+        name: 인스타그램 (메인 계정 1)
+        url: https://www.instagram.com
+        category: social
+        has_api: false
+        api_secret_location: null
+        owner: mkt
+        impact_on_rotation: 콘텐츠 게시 일시 중단
+        notes: Meta Business와 연동 상태 확인 후 회전.
+
+      - id: instagram-2
+        name: 인스타그램 (서브 계정 2)
+        url: https://www.instagram.com
+        category: social
+        has_api: false
+        api_secret_location: null
+        owner: mkt
+        impact_on_rotation: 콘텐츠 게시 일시 중단
+        notes: 인스타1과 같은 날 회전 금지(도미노).
+
+      - id: slack-admin
+        name: 슬랙 관리자
+        url: https://truvia.slack.com/admin
+        category: saas
+        has_api: true
+        api_secret_location: ssot_secrets.slack_admin
+        owner: admin
+        impact_on_rotation: Slack 알림 봇 토큰 동시 회전 필요
+        notes: 알림 webhook 재발급. 봇 권한 그대로 유지 확인.
+
+      - id: ezadmin
+        name: 이지어드민
+        url: https://www.ezadmin.co.kr
+        category: saas
+        has_api: false
+        api_secret_location: null
+        owner: ops
+        impact_on_rotation: 주문 통합관리 도구 — 일시 중단
+        notes: ERP 연동 확인. 영업일 오전.
+
+      - id: inforkdeal
+        name: 인포크딜
+        url: https://www.inforkdeal.com
+        category: saas
+        has_api: false
+        api_secret_location: null
+        owner: mkt
+        impact_on_rotation: 제휴 마케팅 캠페인 조회 중단
+        notes: 회전 후 캠페인 상태 sanity check.
+
+  # ─────────────────────────────────────────
+  # P1.5 — Week 2 후반, P1 리스트 7번째(부트스트랩 카운트 6 정합)
+  # ─────────────────────────────────────────
+  - tier: p1.5
+    week: 2
+    sla: 2-week
+    accounts:
+      - id: sgi-seoul-bo
+        name: SGI 서울보증
+        url: https://www.sgic.co.kr
+        category: banking
+        has_api: false
+        api_secret_location: null
+        owner: admin
+        impact_on_rotation: 보증증권 발급 절차 일시 영향
+        notes: 공동인증서 병행 로그인. 회전 빈도 낮아도 ok.
+
+  # ─────────────────────────────────────────
+  # P2 — Week 2~4, SLA 1개월
+  # ─────────────────────────────────────────
+  - tier: p2
+    week: 2-4
+    sla: 1-month
+    accounts:
+      - id: gov24
+        name: 정부24
+        url: https://www.gov.kr
+        category: government
+        has_api: false
+        api_secret_location: null
+        owner: admin
+        impact_on_rotation: 민원 발급 일시 영향, 빈도 낮음
+        notes: 공동인증서 의존. 비번 회전보다 인증서 갱신이 우선.
+
+      - id: koreanet
+        name: 코리아넷
+        url: https://www.koreanet.go.kr
+        category: government
+        has_api: false
+        api_secret_location: null
+        owner: admin
+        impact_on_rotation: 통계 조회 한정, 영향 미미
+        notes: 비번 정책 약함 — 강한 비번으로 교체 가치 큼.
+
+      - id: kstartup
+        name: 케이스타트업
+        url: https://www.k-startup.go.kr
+        category: government
+        has_api: false
+        api_secret_location: null
+        owner: admin
+        impact_on_rotation: 사업 공고 조회/지원 시점에만 영향
+        notes: 지원사업 공고 마감 직전 회전 금지.
+
+      - id: foodsafetykorea
+        name: 디지털식품 (식약처)
+        url: https://www.foodsafetykorea.go.kr
+        category: government
+        has_api: false
+        api_secret_location: null
+        owner: admin
+        impact_on_rotation: 식품 인허가 조회 한정
+        notes: 영업일 오전. 인증서 의존 가능.
+
+      - id: sungwon-adpia
+        name: 성원애드피아
+        url: https://www.adpia.co.kr
+        category: saas
+        has_api: false
+        api_secret_location: null
+        owner: mkt
+        impact_on_rotation: 인쇄/판촉물 주문 시점에만 영향
+        notes: 빈도 낮음. 마지막 주에 처리.
+
+      - id: misc-others
+        name: 기타 (잡 SaaS·서비스)
+        url: null
+        category: saas
+        has_api: false
+        api_secret_location: null
+        owner: admin
+        impact_on_rotation: 개별 영향 미미, 합산 시 누락 risk
+        notes: 한 슬롯에 모아서 4주차에 일괄 처리. 항목은 시트에서 확인.
