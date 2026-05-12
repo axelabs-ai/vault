@@ -1,0 +1,19 @@
+# vault-cron schedule — absorbs host LaunchAgents into supercronic.
+# Format: m h dom mon dow  command
+# All times Asia/Seoul (set by tzdata + /etc/localtime in image).
+# Logs append to /logs/* which is bind-mounted to ~/realchoice-ssot/logs.
+
+# Daily backup — was com.realchoice.vault-backup (StartCalendarInterval Hour=3 Minute=10)
+10 3 * * *     bash /app/scripts/backup-job.sh
+
+# Health probe every 10 minutes — was com.realchoice.vault-health (StartInterval 600)
+*/10 * * * *   bash /app/scripts/health-job.sh
+
+# Log rotation (50MB threshold, gzip, retain 30 days) — new L3-1
+5 0 * * *      bash /app/scripts/logrotate-job.sh
+
+# Retention sweep (backups >30d, health logs >7d) — new L3-1
+30 4 * * 0     bash /app/scripts/retention-job.sh
+
+# Weekly CVE check for Vaultwarden upstream — new L3-2
+0 9 * * 1      bash /app/scripts/cve-check-job.sh

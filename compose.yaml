@@ -45,3 +45,38 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./caddy-data:/data
+
+  # L2-1 + L2-2 + L3-1 + L3-2 uplift (2026-05-12)
+  # Absorbs the two host LaunchAgents (com.realchoice.vault-backup, vault-health)
+  # into a supercronic-driven container that follows the stream-level pattern.
+  # Trade-off: mounts /var/run/docker.sock to call `docker exec vault-app
+  # /vaultwarden backup`. Image is minimal alpine — no shell exposed beyond
+  # supercronic + our 5 job scripts. See vault/cron/Dockerfile.
+  cron:
+    image: vault-cron:latest
+    build:
+      context: ./cron
+      dockerfile: Dockerfile
+    container_name: vault-cron
+    restart: unless-stopped
+    depends_on:
+      vaultwarden:
+        condition: service_healthy
+    environment:
+      VAULT_CONTAINER: vault-app
+      VAULT_CADDY: vault-caddy
+      VAULT_GPG_RECIPIENT: vault-backup@realchoice.co.kr
+      VAULT_BACKUP_DIR: /backups
+      VAULT_LOG_DIR: /logs
+      VAULT_BACKUP_RETAIN_DAYS: "30"
+      VAULT_HEALTH_LOG_RETAIN_DAYS: "7"
+      TZ: Asia/Seoul
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOME}/backups/vault:/backups
+      - ${HOME}/realchoice-ssot/logs:/logs
+      - ./data:/vault-data:ro
+    deploy:
+      resources:
+        limits:
+          memory: 128M

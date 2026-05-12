@@ -95,14 +95,26 @@ curl -fsS https://macmini.<TAILNET>.ts.net/alive
 | 항목 | 상태 |
 |---|---|
 | `vault-app` (Vaultwarden 1.35.8-alpine) | Up, healthy |
-| `vault-caddy` (Caddy 2-alpine) | Up |
+| `vault-caddy` (Caddy 2-alpine, :80 + :443 self-signed) | Up |
+| `vault-cron` (supercronic, alpine) | Up — 5 jobs scheduled (L2+L3 uplift, 2026-05-12) |
 | `/alive` ([localhost:8222](http://127.0.0.1:8222/alive)) | 200 OK |
 | GPG keypair `vault-backup@realchoice.co.kr` | 생성됨 (ed25519+cv25519, unattended) |
-| 첫 백업 `~/backups/vault/2026-05-12.tar.gpg` | 12K, restore-test PASS |
-| `com.realchoice.vault-backup` LaunchAgent | bootstrapped (매일 03:10) |
-| `com.realchoice.vault-health` LaunchAgent | running (10분 주기, `~/realchoice-ssot/logs/vault-health.jsonl`) |
+| 첫 백업 `~/backups/vault/2026-05-12.tar.gpg` | 10K, end-to-end decrypt+sqlite verify PASS |
+| 운영자 가입 (`team@realchoice.co.kr`) | ✓ 1 user, SIGNUPS_ALLOWED=false |
 | Master Password 후보 | `~/.config/vault/MASTER_PASSWORD_INITIAL` (600) |
 | GitHub repo | [soohunkang/vault](https://github.com/soohunkang/vault), main branch pushed |
+
+#### vault-cron 스케줄 (supercronic, Asia/Seoul)
+
+| cron | job | 흡수한 LaunchAgent |
+|---|---|---|
+| `10 3 * * *` | `backup-job.sh` — `/vaultwarden backup` snapshot → GPG → /backups (+ optional B2) | `com.realchoice.vault-backup` (bootout 됨) |
+| `*/10 * * * *` | `health-job.sh` — 6 probe JSON → `/logs/vault-health.jsonl` | `com.realchoice.vault-health` (bootout 됨) |
+| `5 0 * * *` | `logrotate-job.sh` — 50MB+ gzip, 30d retain | (신규 L3-1) |
+| `30 4 * * 0` | `retention-job.sh` — backup 30d 삭제, health JSONL 7d 트림 | (신규 L3-1) |
+| `0 9 * * 1` | `cve-check-job.sh` — Vaultwarden 신규 릴리스 + advisories 폴 | (신규 L3-2) |
+
+trade-off: `/var/run/docker.sock` 마운트로 `docker exec vault-app /vaultwarden backup` 수행. cron 이미지는 supercronic + 5개 스크립트만 — bash·gpg·jq·curl·rclone 외 노출 없음.
 
 ### 외부 노출 (Tailscale) — 마지막 1단계
 
