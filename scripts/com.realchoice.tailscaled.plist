@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Tailscale daemon — userspace networking (no sudo required)
+
+  Userspace mode is sufficient for `tailscale serve` (the only feature
+  vault needs). The native TUN mode would require root + `sudo tailscaled`.
+
+  Install:
+    cp ~/vault/scripts/com.realchoice.tailscaled.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.realchoice.tailscaled.plist
+  Verify:
+    launchctl print gui/$(id -u)/com.realchoice.tailscaled
+    tailscale status            # should report "Logged out" until `tailscale up`
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.realchoice.tailscaled
+    rm ~/Library/LaunchAgents/com.realchoice.tailscaled.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.realchoice.tailscaled</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/tailscale/bin/tailscaled</string>
+        <string>--tun=userspace-networking</string>
+        <string>--socket=/Users/realchoice/Library/Application Support/Tailscale/tailscaled.sock</string>
+        <string>--state=/Users/realchoice/Library/Application Support/Tailscale/tailscaled.state</string>
+        <string>--statedir=/Users/realchoice/Library/Application Support/Tailscale</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/realchoice/realchoice-ssot/logs/tailscaled.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/realchoice/realchoice-ssot/logs/tailscaled.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/realchoice</string>
+        <key>TS_SOCKET</key>
+        <string>/Users/realchoice/Library/Application Support/Tailscale/tailscaled.sock</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
