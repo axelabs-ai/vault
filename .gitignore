@@ -15,6 +15,11 @@ backups/
 *.asc
 *.key
 
+# Allowlist: vault-backup public key is safe to commit (Dockerfile needs it
+# at build time and it's the *public* half by design)
+!vault-backup.pub.asc
+!cron/keys/vault-backup.pub.asc
+
 # macOS noise
 .DS_Store
 
