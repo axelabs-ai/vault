@@ -1,4 +1,19 @@
+# vault Caddy 리버스 프록시
+#
+# :80   — plain HTTP, Tailscale Serve가 사용 (외부 tailnet → HTTPS 종단은 Tailscale에서)
+# :443  — Caddy self-signed (tls internal), 로컬 signup용
+#
+# 운영 시점 외부 노출은 Tailscale Serve 단독 (LAN tailnet 한정). Caddy 443는
+# macmini 로컬 브라우저가 https://localhost:8443/로 접근하는 용도. 브라우저 첫
+# 접속 시 self-signed 경고 → "Advanced" → "Proceed" 1회 클릭 후 가입 가능.
+
 :80 {
+	reverse_proxy vault-app:80
+	encode zstd gzip
+}
+
+localhost:443, 127.0.0.1:443 {
+	tls internal
 	reverse_proxy vault-app:80
 	encode zstd gzip
 }
