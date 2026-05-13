@@ -1,19 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Tailscale daemon — userspace networking (no sudo required)
+  ⚠ DEPRECATED (2026-05-13, 라운드 12)
 
-  Userspace mode is sufficient for `tailscale serve` (the only feature
-  vault needs). The native TUN mode would require root + `sudo tailscaled`.
+  본 LaunchAgent 는 userspace networking 모드 tailscaled 를 가동했습니다.
+  라운드 12 에서 `tailscale-app` cask (네이티브 TUN) 로 마이그레이션 — 사용자가
+  sudo .pkg 1회 실행 후 메뉴바 앱이 시스템 daemon 운영.
 
-  Install:
+  네이티브 모드 장점:
+    - macmini 자체에서도 tailnet URL 도달 가능 (자기 자신 routing)
+    - VNC 등 임의 TCP 포트 inbound 라우팅 (옵션 B 의 핵심)
+    - 메뉴바 GUI + 자동 갱신
+
+  본 plist 는 **참조용 / 응급 fallback** 으로 보존:
+    - 만약 cask 가 어떤 이유로 가동 안 되면 본 plist 로 userspace 모드 복귀.
+    - 그 경우 cask 데몬 우선 정지 필요.
+
+  현재 운영:
+    - 시스템 daemon : `/Applications/Tailscale.app` (cask)
+    - hostname     : realchoice-macmini.tail090015.ts.net
+    - serve        : `tailscale serve --bg 8222` → http://127.0.0.1:8222
+
+  이전 사용법 (deprecated):
     cp ~/vault/scripts/com.realchoice.tailscaled.plist ~/Library/LaunchAgents/
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.realchoice.tailscaled.plist
-  Verify:
-    launchctl print gui/$(id -u)/com.realchoice.tailscaled
-    tailscale status            # should report "Logged out" until `tailscale up`
-  Uninstall:
-    launchctl bootout gui/$(id -u)/com.realchoice.tailscaled
-    rm ~/Library/LaunchAgents/com.realchoice.tailscaled.plist
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
