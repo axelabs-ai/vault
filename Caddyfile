@@ -12,7 +12,7 @@
 	encode zstd gzip
 }
 
-localhost:443, 127.0.0.1:443 {
+localhost:443, 127.0.0.1:443, vault-caddy:443 {
 	tls internal
 	reverse_proxy vault-app:80
 	encode zstd gzip

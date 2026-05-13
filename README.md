@@ -97,6 +97,7 @@ curl -fsS https://macmini.<TAILNET>.ts.net/alive
 | `vault-app` (Vaultwarden 1.35.8-alpine) | Up, healthy |
 | `vault-caddy` (Caddy 2-alpine, :80 + :443 self-signed) | Up |
 | `vault-cron` (supercronic, alpine) | Up — 5 jobs scheduled (L2+L3 uplift, 2026-05-12) |
+| `vault-mcp` (FastMCP SSE :8772, python:3.12-slim) | Up — 11 tools (라운드 11, 2026-05-13) |
 | `/alive` ([localhost:8222](http://127.0.0.1:8222/alive)) | 200 OK |
 | GPG keypair `vault-backup@realchoice.co.kr` | 생성됨 (ed25519+cv25519, unattended) |
 | 첫 백업 `~/backups/vault/2026-05-12.tar.gpg` | 10K, end-to-end decrypt+sqlite verify PASS |
@@ -115,6 +116,46 @@ curl -fsS https://macmini.<TAILNET>.ts.net/alive
 | `0 9 * * 1` | `cve-check-job.sh` — Vaultwarden 신규 릴리스 + advisories 폴 | (신규 L3-2) |
 
 trade-off: `/var/run/docker.sock` 마운트로 `docker exec vault-app /vaultwarden backup` 수행. cron 이미지는 supercronic + 5개 스크립트만 — bash·gpg·jq·curl·rclone 외 노출 없음.
+
+#### vault-mcp 도구 (FastMCP SSE :8772, 2026-05-13)
+
+부트스트랩 §1.2·§8.1 가 vault MCP 미노출을 명시적으로 결정했으나, 운영 통일성
+요구로 본 라운드에서 우회. 보안 가드:
+
+- **비밀번호 본문 절대 미반환** — `bw get password` 도구 미정의. LLM 은 메타데이터만 본다.
+- 생성 도구는 강한 랜덤 자동 발급 후 ID 만 반환 — 사람이 Bitwarden 앱으로 조회.
+- 모든 호출 audit log (`/logs/vault-mcp-audit.jsonl`).
+- Bearer 토큰 인증 (raw ASGI middleware, SSE streaming 호환).
+
+11 tools (prefix `vault_*`):
+
+| 카테고리 | 도구 | 비고 |
+|---|---|---|
+| health | `vault_health` | 컨테이너·alive·backup·디스크·bw 세션 |
+| health | `vault_stats` | total/by_type/with_password/latest_revision |
+| read | `vault_list_items` | folder·type 필터, 메타데이터만 |
+| read | `vault_search` | name·notes·username·uri 부분일치 (대소문자 무시) |
+| read | `vault_check_known` | 사이트명 존재 여부 |
+| read | `vault_folders` | 폴더 + 항목 수 |
+| read | `vault_rotation_due` | N일+ 미회전 login 목록 |
+| admin | `vault_releases` | 업스트림 신규 릴리스 + advisories |
+| admin | `vault_admin_users` | `/admin/users.json` (ADMIN_TOKEN 필요) |
+| write | `vault_create_login` | 강한 랜덤 PW 자동 발급, 반환은 ID 만 |
+| meta | `vault_unified_inventory` | 자가 도구 인벤토리 |
+
+운영 명령:
+```bash
+# 상태
+docker logs vault-mcp --tail 50
+# 도구 호출 (외부 컨테이너에서 MCP client)
+curl -fsS -H "Authorization: Bearer $(grep VAULT_MCP_AUTH_TOKEN ~/.config/truvia/vault-mcp.env | cut -d= -f2)" \
+     http://127.0.0.1:8772/sse
+# audit
+tail -f ~/realchoice-ssot/logs/vault-mcp-audit.jsonl
+```
+
+env 위치: `~/.config/truvia/vault-mcp.env` (chat-scope 외부, perms 600).
+Master Password 본문: `~/.config/vault/MASTER_PASSWORD_INITIAL` RO 마운트로 컨테이너에 전달.
 
 ### 외부 노출 (Tailscale) — 마지막 1단계
 

@@ -46,6 +46,42 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./caddy-data:/data
 
+  # MCP layer (라운드 11, 2026-05-13)
+  # 부트스트랩 §1.2·§8.1 결정(vault MCP 미노출)을 운영 통일성 요구로 우회.
+  # 보안 가드: 비밀번호 본문 절대 미반환, 메타데이터만 노출, Bearer 인증,
+  # 전 호출 audit log. SoT 스펙: vault/mcp/Dockerfile + vault_mcp/server.py.
+  mcp:
+    image: vault-mcp:latest
+    build:
+      context: ./mcp
+      dockerfile: Dockerfile
+    container_name: vault-mcp
+    restart: unless-stopped
+    depends_on:
+      vaultwarden:
+        condition: service_healthy
+    env_file:
+      - ${VAULT_MCP_ENV_FILE:-/Users/realchoice/.config/truvia/vault-mcp.env}
+    environment:
+      VAULT_MCP_TRANSPORT: sse
+      VAULT_MCP_HTTP_HOST: 0.0.0.0
+      VAULT_MCP_HTTP_PORT: "8772"
+      BW_SERVER_URL: https://vault-caddy:443
+      VAULT_LOG_DIR: /app/logs
+      VAULT_OWNER_PASSWORD_FILE: /run/secrets/vault_master_password
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
+      TZ: Asia/Seoul
+    ports:
+      - "127.0.0.1:8772:8772"
+    volumes:
+      - ${HOME}/realchoice-ssot/logs:/app/logs
+      - ${HOME}/backups/vault:/backups:ro
+      - ${HOME}/.config/vault/MASTER_PASSWORD_INITIAL:/run/secrets/vault_master_password:ro  # pragma: allowlist secret
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
   # L2-1 + L2-2 + L3-1 + L3-2 uplift (2026-05-12)
   # Absorbs the two host LaunchAgents (com.realchoice.vault-backup, vault-health)
   # into a supercronic-driven container that follows the stream-level pattern.
