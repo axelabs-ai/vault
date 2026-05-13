@@ -6,7 +6,9 @@
 set -uo pipefail
 
 LOGFILE="${VAULT_LOG_DIR}/vault-health.jsonl"
-ALIVE_URL="http://${VAULT_CADDY}:80/alive"
+# vault-app 직접 호출 — Caddy :80 → :443 자동 redirect (308) 우회.
+# vault-app 컨테이너 안 Rocket(Vaultwarden) 이 직접 응답.
+ALIVE_URL="http://${VAULT_CONTAINER}:80/alive"
 BACKUP_MAX_AGE_SEC=$((26 * 3600))
 DISK_MIN_FREE_BYTES=$((1024 * 1024 * 1024))   # 1 GiB
 
@@ -72,7 +74,7 @@ probe_disk() {
 probe_admin_token() {
     # Re-verify by probing /admin (any 200/302/401 means Vaultwarden is serving the route).
     local code
-    code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://${VAULT_CADDY}:80/admin" || echo 000)
+    code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://${VAULT_CONTAINER}:80/admin" || echo 000)
     if [[ "$code" =~ ^(200|301|302|401)$ ]]; then
         printf 'ok:admin_route_%s' "$code"
     else
