@@ -1,0 +1,89 @@
+From ae2b1ea007b11f4152ac0b471a05c8666758e0bc Mon Sep 17 00:00:00 2001
+From: axe-ci <ci@axelabs.ai>
+Date: Tue, 26 May 2026 11:59:27 +0900
+Subject: [PATCH 3/4] axe: remove access_all skip on collection user save (3
+ sites)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Owner role has Membership.access_all=true by default. The existing
+'if member.access_all { continue; }' skip in three sites of
+src/api/core/organizations.rs prevents the explicit users_collections
+row from being created for Owners, even though downstream permission
+checks require it.
+
+Affected handlers:
+- post_organization_collections          (POST /organizations/<id>/collections)
+- post_bulk_access_collections           (POST /organizations/<id>/collections/bulk-access)
+- post_organization_collection_update    (POST /organizations/<id>/collections/<col_id>;
+                                          also called by put_organization_collection_update)
+
+Result of the prior skip: Owner's users_collections entry is missing,
+which causes (a) cipher.permissions.delete to compute false on Owner-
+created ciphers via get_access_restrictions's collection-row check,
+(b) bw CLI 'collection edit' / 'cipher delete' to silently fail with
+'no permission' before any HTTP request reaches the server, and
+(c) /admin endpoints to require explicit fallback paths.
+
+Removing the skip lets CollectionUser::save run for every member in
+the request body — including Owners — which is the behavior the API
+contract implies (the request body explicitly lists users with
+read_only/hide_passwords/manage flags; honoring them for Owners too
+is the principle of least surprise).
+---
+ src/api/core/organizations.rs | 24 ++++++++++++------------
+ 1 file changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/src/api/core/organizations.rs b/src/api/core/organizations.rs
+index 2f5ea6b..70d4bc7 100644
+--- a/src/api/core/organizations.rs
++++ b/src/api/core/organizations.rs
+@@ -519,10 +519,12 @@ async fn post_organization_collections(
+             err!("User is not part of organization")
+         };
+ 
+-        if member.access_all {
+-            continue;
+-        }
+-
++        // AXE patch — Do NOT skip when member.access_all is true. Owner role has
++        // access_all=true by default, and skipping the explicit CollectionUser
++        // entry leaves the collection without any users_collections row for that
++        // member. Downstream permission checks (cipher.permissions.delete via
++        // get_access_restrictions, admin endpoints) require the explicit row even
++        // when access_all is true.
+         CollectionUser::save(
+             &member.user_uuid,
+             &collection.uuid,
+@@ -597,10 +599,9 @@ async fn post_bulk_access_collections(
+                 err!("User is not part of organization")
+             };
+ 
+-            if member.access_all {
+-                continue;
+-            }
+-
++            // AXE patch — see note in post_organization_collections; same rule
++            // for bulk access updates: Owner (access_all=true) still needs an
++            // explicit users_collections row.
+             CollectionUser::save(
+                 &member.user_uuid,
+                 &col_id,
+@@ -682,10 +683,9 @@ async fn post_organization_collection_update(
+             err!("User is not part of organization")
+         };
+ 
+-        if member.access_all {
+-            continue;
+-        }
+-
++        // AXE patch — see note in post_organization_collections; same rule
++        // for collection updates: Owner (access_all=true) still needs an
++        // explicit users_collections row.
+         CollectionUser::save(&member.user_uuid, &col_id, user.read_only, user.hide_passwords, user.manage, &mut conn)
+             .await?;
+     }
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,99 @@
+From 4363ed36cd92a581287d79a2b3b087fde184630d Mon Sep 17 00:00:00 2001
+From: axe-ci <ci@axelabs.ai>
+Date: Tue, 26 May 2026 12:00:08 +0900
+Subject: [PATCH 4/4] axe: backport cipher.permissions field to to_json
+ (delete/restore)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bitwarden client >= 2026.4 (bw CLI 2026.4.x, Chrome extension) reads
+a 'permissions' object on every cipher to decide whether to send a
+delete/restore request. The mainline Bitwarden server returns this
+field; Timshel/Vaultwarden does not. Without it, the client treats
+delete/restore as false and silently rejects 'bw delete <id>' before
+any HTTP request reaches the server (visible to the user only as
+'You do not have permission to delete this item').
+
+This patch adds 'permissions' next to the existing 'edit' /
+'viewPassword' fields in Cipher::to_json (CipherSyncType::User branch
+only — organization syncs do not need it).
+
+can_delete computation:
+  organization cipher:
+    - if the user's get_access_restrictions returned manage=true
+      (covers full_access_org, full_access_group, or any collection
+      row with manage=true), grant delete.
+    - else look up the user's Membership for the cipher's org and
+      grant delete iff the role is Owner or Admin (atype <= 1). This
+      mirrors mainline behavior for org admins who can delete any
+      cipher in the org regardless of per-collection flags.
+  personal cipher:
+    - reuse 'manage' from get_access_restrictions, which returns
+      true via the is_owned_by_user fast-path.
+
+restore mirrors delete — clients gate the 'restore from trash' button
+on the same permission.
+
+The 'manage' value reuses the third element of the get_access_-
+restrictions tuple by binding it (previously discarded as '_'), so no
+additional database round-trip is introduced. The extra
+Membership::find_by_user_and_org lookup runs only on org ciphers
+where the user lacks collection-level manage (the case where the
+admin-override matters).
+---
+ src/db/models/cipher.rs | 31 ++++++++++++++++++++++++++++++-
+ 1 file changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/src/db/models/cipher.rs b/src/db/models/cipher.rs
+index 4a1b978..d43ff9c 100644
+--- a/src/db/models/cipher.rs
++++ b/src/db/models/cipher.rs
+@@ -158,7 +158,9 @@ impl Cipher {
+ 
+         // We don't need these values at all for Organizational syncs
+         // Skip any other database calls if this is the case and just return false.
+-        let (read_only, hide_passwords, _) = if sync_type == CipherSyncType::User {
++        // AXE patch — bind the third tuple element (manage) instead of '_' so the
++        // permissions field below can reuse it without a second database call.
++        let (read_only, hide_passwords, manage) = if sync_type == CipherSyncType::User {
+             match self.get_access_restrictions(user_uuid, cipher_sync_data, conn).await {
+                 Some((ro, hp, mn)) => (ro, hp, mn),
+                 None => {
+@@ -372,6 +374,33 @@ impl Cipher {
+             // the "Read Only" or "Hide Passwords" restrictions for the user.
+             json_object["edit"] = json!(!read_only);
+             json_object["viewPassword"] = json!(!hide_passwords);
++
++            // AXE patch — Bitwarden client >= 2026.4 expects a 'permissions' object
++            // on every cipher. Without it the client defaults to delete:false /
++            // restore:false and silently rejects 'bw delete' before any HTTP
++            // request reaches the server.
++            //
++            // can_delete = collection-level manage flag OR (for org ciphers) the
++            // user's org-level role is Owner/Admin. For personal ciphers, manage
++            // is already true when get_access_restrictions returned via the
++            // is_owned_by_user branch, so reusing manage covers that case too.
++            let can_delete = if let Some(ref org_uuid) = self.organization_uuid {
++                if manage {
++                    true
++                } else {
++                    Membership::find_by_user_and_org(user_uuid, org_uuid, conn)
++                        .await
++                        .map(|m| m.atype <= MembershipType::Admin as i32)
++                        .unwrap_or(false)
++                }
++            } else {
++                manage
++            };
++            json_object["permissions"] = json!({
++                "response": null,
++                "delete": can_delete,
++                "restore": can_delete,
++            });
+         }
+ 
+         let key = match self.atype {
+-- 
+2.50.1 (Apple Git-155)
+
