@@ -2,7 +2,13 @@ name: vault
 
 services:
   vaultwarden:
-    image: vaultwarden/server:1.35.8-alpine
+    # Official upstream — fork 졸업 (2026-06-13). timshel SSO fork 가 본가 합류:
+    # 1.35.0 SSO 네이티브, 1.35.5 sync UserDecryption, 1.36.0 prelogin/password.
+    # 구 axe 패치 2건 (30835e9b, ab685324) 모두 본가 포함 → 패치 불필요.
+    # 롤백: image 를 axelabs-ai/vault:1.34.1-6-axe.2 로 되돌리고
+    # data 를 data.bak.20260613-preupgrade 에서 복원 (DB 마이그레이션 비가역).
+    # 주의: ORGANIZATION_INVITE_AUTO_ACCEPT 는 timshel 전용 — 본가엔 없어 무시됨.
+    image: vaultwarden/server:1.36.0
     container_name: vault-app
     restart: unless-stopped
     # Secrets (ADMIN_TOKEN, DOMAIN, SIGNUPS_ALLOWED) injected from this file.
@@ -23,7 +29,7 @@ services:
     expose:
       - "80"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/alive"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/vault/alive"]
       interval: 60s
       timeout: 5s
       retries: 3
