@@ -72,7 +72,10 @@ services:
       VAULT_MCP_TRANSPORT: sse
       VAULT_MCP_HTTP_HOST: 0.0.0.0
       VAULT_MCP_HTTP_PORT: "8772"
-      BW_SERVER_URL: https://vault-caddy:443
+      # /vault 서브패스 필수 — DOMAIN=https://realchoice.axelabs.ai/vault 로 변경되며
+      # Vaultwarden routes 가 /vault 아래 mount 됨. 서브패스 누락 시 bw ServerConfig 404
+      # (in-memory 세션이 마스킹하다 2026-06-13 1.36.0 재기동으로 노출). L5b 진단.
+      BW_SERVER_URL: https://vault-caddy:443/vault
       VAULT_LOG_DIR: /app/logs
       VAULT_OWNER_PASSWORD_FILE: /run/secrets/vault_master_password
       NODE_TLS_REJECT_UNAUTHORIZED: "0"

@@ -14,6 +14,13 @@ backups/
 # Generated on every build; never commit.
 build/.work/
 
+# Migration import files — contain PLAINTEXT credentials, NEVER commit.
+# (sheet-to-vault.py / stream L5b export outputs. Shred after `bw import`.)
+migration/*.json
+migration/*.csv
+migration/import-*
+migration/ssot-human-creds-*
+
 # GPG keys
 *.gpg
 *.asc
