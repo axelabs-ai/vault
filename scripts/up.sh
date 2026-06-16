@@ -2,7 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ENV_FILE="${VAULT_ENV_FILE:-$HOME/.config/vault/.env}"
+# 기본값은 compose 기본값(./env.local)과 일치시킨다. 과거 $HOME/.config/vault/.env
+# 를 가리켰으나 그 파일의 DOMAIN 에 /vault 서브패스가 누락(stale)돼, up.sh 로 띄우면
+# vault-app 이 잘못된 DOMAIN 으로 재생성되며 /vault/alive 404 → unhealthy 가 됐다
+# (2026-06-15 L5b 에서 실제 발생). ./env.local 이 /vault DOMAIN 을 가진 SoT.
+ENV_FILE="${VAULT_ENV_FILE:-./env.local}"
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "[vault] env file not found: $ENV_FILE" >&2
   exit 1

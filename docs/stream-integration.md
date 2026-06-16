@@ -43,7 +43,8 @@
     "alive":        "ok:alive",
     "backup_fresh": "ok:age_42000s",
     "disk_free":    "ok:free_85899345920b",
-    "admin_token":  "ok:present"
+    "admin_token":  "ok:present",
+    "mcp_session":  "ok:unlocked"
   }
 }
 ```
@@ -55,17 +56,31 @@
 | `summary` | string | 사람이 읽는 한 줄 요약 (실패/디그레이드 체크 이름 나열) |
 | `checks.*` | string `"<level>:<detail>"` | 각 프로브 결과. level은 `ok` / `degraded` / `fail` |
 
-### 체크 6종
+### 체크 7종
 
 1. `vault_app` — `docker ps` 기준 `vault-app` 컨테이너의 `(healthy)` 여부.
 2. `vault_caddy` — 동일 방식으로 `vault-caddy`.
-3. `alive` — `curl http://127.0.0.1:8222/alive` 응답에 `Vaultwarden is running!` 포함.
+3. `alive` — Vaultwarden `/vault/alive` 응답. 호스트는 Caddy 경유 http→https
+   308 redirect(백엔드 생존 증거)를 `ok`, cron 컨테이너는 `vault-app:80/vault/alive`
+   직결 200 본문을 `ok` 로 본다. (DOMAIN=.../vault 서브패스 반영 — L5b 드리프트 수정)
 4. `backup_fresh` — `~/backups/vault/*.tar.gpg` 최신 파일이 26시간 이내.
 5. `disk_free` — `~/backups/vault`의 free space > 1 GiB.
-6. `admin_token` — `~/.config/vault/.env`에 `ADMIN_TOKEN=` 라인 존재.
+6. `admin_token` — 호스트는 `~/.config/vault/.env`의 `ADMIN_TOKEN=` 라인,
+   cron 컨테이너는 `/vault/admin` 라우트 응답(200/301/302/401).
+7. `mcp_session` — **vault-mcp 의 bw 세션 liveness**. `GET vault-mcp:8772/healthz?deep=1`
+   (인증 면제)가 `bw status==unlocked` + `bw sync` 서버 도달성을 검증. uvicorn 이
+   200 을 돌려줘도 bw 세션이 죽으면 503 → `degraded` 로 집계. 세션 사망은
+   Vaultwarden 코어와 무관하므로 `down`(데이터플레인 장애) 아닌 `degraded`.
+   (2026-06-13 bw 세션이 boot 실패로 ~한 달간 먹통이었으나 모두 healthy 로
+   보고되던 사각지대를 메움 — L5b.)
 
 스크립트의 종료 코드: `0=ok / 1=degraded / 2=down` — LaunchAgent 로그와
 다운스트림 알림 파이프라인에서 그대로 활용 가능.
+
+> **참고**: `mcp_session` 의 detection 경로는 vault-mcp 의 `/healthz` 엔드포인트.
+> `/livez` 는 프로세스 liveness(항상 200), `/healthz` 는 bw 세션(죽으면 503),
+> `?deep=1` 은 추가로 서버 도달성(`bw sync`)까지 검증. compose 의 mcp 서비스
+> Docker healthcheck 도 `/healthz` 를 사용해 `docker ps` 에 세션 상태가 반영된다.
 
 ---
 

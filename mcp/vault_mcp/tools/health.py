@@ -63,12 +63,15 @@ def register(mcp) -> None:
         except Exception as e:  # noqa: BLE001
             checks["disk_free"] = f"fail:{type(e).__name__}"
 
-        # 4. bw session alive
+        # 4. bw session alive — get() 은 broken 싱글톤이면 자동 재-boot 시도.
+        #    health() 는 raise 없이 status=='unlocked' 까지 검증 (L5b 사각지대).
+        #    세션 사망은 Vaultwarden 코어/데이터플레인과 무관 → degraded (down 아님).
+        #    shell 프로브 및 stream-integration.md 분류와 일치시킨다.
         try:
-            BwClient.get().call("status", timeout=5)
-            checks["mcp_session"] = "ok"
-        except Exception as e:  # noqa: BLE001
-            checks["mcp_session"] = f"fail:{type(e).__name__}"
+            h = BwClient.get().health()
+            checks["mcp_session"] = "ok" if h["ok"] else f"degraded:{h['bw_status']}"
+        except Exception as e:  # noqa: BLE001 — boot 가 여전히 실패
+            checks["mcp_session"] = f"degraded:boot_{type(e).__name__}"
 
         failed = [k for k, v in checks.items() if v.startswith("fail")]
         degraded = [k for k, v in checks.items() if v.startswith("degraded")]

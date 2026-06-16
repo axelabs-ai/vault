@@ -86,6 +86,15 @@ services:
       - ${HOME}/realchoice-ssot/logs:/app/logs
       - ${HOME}/backups/vault:/backups:ro
       - ${HOME}/.config/vault/MASTER_PASSWORD_INITIAL:/run/secrets/vault_master_password:ro  # pragma: allowlist secret
+    # bw 세션 liveness 헬스 — /healthz 가 세션 죽으면 503 → 컨테이너 unhealthy.
+    # uvicorn liveness 만으론 bw 세션 사망을 못 잡던 사각지대를 메움 (L5b, 2026-06-13).
+    # 가벼운 bw status 점검 (sync 없음); 서버 도달성 deep 검증은 10분 헬스 프로브 몫.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8772/healthz"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     deploy:
       resources:
         limits:
@@ -110,6 +119,7 @@ services:
     environment:
       VAULT_CONTAINER: vault-app
       VAULT_CADDY: vault-caddy
+      VAULT_MCP: vault-mcp
       VAULT_GPG_RECIPIENT: vault-backup@realchoice.co.kr
       VAULT_BACKUP_DIR: /backups
       VAULT_LOG_DIR: /logs

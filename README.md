@@ -20,7 +20,8 @@ Backblaze B2 (rclone) + 분기 USB → 금고
 ```
 
 - **MCP 평면과 격리** — magnet/stream/realchoice MCP는 vault 데이터 read/write 절대 금지
-- **stream 신호 1개**: 백업 실패 → `magnet_alerts.vault_health` → Slack `#data-ops`
+- **stream 신호 1개**: 헬스 degraded/down (백업 stale·alive·**bw 세션 사망** 등)
+  → `magnet_alerts.vault_health` → Slack `#data-ops`
 
 ---
 

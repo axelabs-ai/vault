@@ -10,9 +10,14 @@
 
 | 시각 | 작업 | 실행 주체 | 검증 방법 |
 |---|---|---|---|
-| 03:10 | 백업 (db.sqlite3 + attachments → GPG → B2) | LaunchAgent `com.realchoice.vault-backup` | `~/realchoice-ssot/logs/vault-backup.log` 마지막 줄 `done … OK` |
-| 매 10분 | 헬스체크 (alive, 컨테이너, 디스크, 백업 신선도) | LaunchAgent `com.realchoice.vault-health` | `~/realchoice-ssot/logs/vault-health.jsonl` 마지막 라인 `"status":"ok"` |
-| 매 10분 | 헬스 알람 emit — degraded/down 시 Slack #data-ops 전송 | `vault-health-emit.sh` (magnet relay 경유) | Slack 채널 확인 |
+| 03:10 | 백업 (db.sqlite3 + attachments → GPG → B2) | `vault-cron` 컨테이너 `backup-job.sh` (supercronic) | `~/realchoice-ssot/logs/*` + `~/backups/vault/<date>.tar.gpg` 갱신 |
+| 매 10분 | 헬스체크 (alive, 컨테이너, 디스크, 백업 신선도, **bw 세션**) | `vault-cron` 컨테이너 `health-job.sh` (supercronic) | `~/realchoice-ssot/logs/vault-health.jsonl` 마지막 라인 `"status":"ok"` (`checks.mcp_session=="ok:unlocked"` 포함) |
+| (수신) | 헬스 degraded/down → Slack #data-ops | stream `magnet_alerts.vault_health` 가 JSONL tail 을 pull → 발사 | Slack 채널 확인 |
+
+> **2026-06-16 정리**: 호스트 LaunchAgent `com.realchoice.vault-backup`·`vault-health` 는
+> 2026-05-12 vault-cron 컨테이너에 흡수됐으나 로드 상태로 남아 있던 것을 retire 했다
+> (`~/Library/LaunchAgents/*.plist.retired` 로 보존 — 복구하려면 rename 후 `launchctl bootstrap`).
+> 이제 `vault-cron` 이 백업·헬스의 단일 실행 주체. 수동 점검은 `scripts/vault-health.sh` 로 가능.
 
 **개입 트리거**: `status:"down"` 이 2회 연속이면 Slack 알람 → 즉시 §6 사고 대응 진입.
 

@@ -8,7 +8,10 @@ PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
 
 BACKUP_DIR="${HOME}/backups/vault"
 ENV_FILE="${HOME}/.config/vault/.env"
-ALIVE_URL="http://127.0.0.1:8222/alive"
+ALIVE_URL="http://127.0.0.1:8222/vault/alive"
+# vault-mcp bw 세션 liveness — 호스트에서는 published 포트(127.0.0.1:8772) 점검.
+# deep=1 → bw status + sync 서버 도달성까지 (L5b: uvicorn 200 ≠ 세션 생존).
+VAULT_MCP_HEALTHZ="${VAULT_MCP_HEALTHZ:-http://127.0.0.1:8772/healthz?deep=1}"
 # Vaultwarden 1.35+ returns ISO 8601 timestamp; <1.35 returned this string.
 ALIVE_EXPECT_LEGACY="Vaultwarden is running!"
 ALIVE_EXPECT_TS_REGEX='^"?[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
@@ -43,16 +46,31 @@ probe_container() {
 }
 
 probe_alive() {
-  local body
-  if ! body="$(curl -fsS -m 5 "${ALIVE_URL}" 2>/dev/null)"; then
+  # 호스트는 Caddy(:8222) 경유만 가능. Vaultwarden 은 http→https 308 표준
+  # redirect 를 발사한다 — 이는 백엔드가 *살아있다는* 증거(죽으면 Caddy 가
+  # 502/503). Location 에 /vault/alive 가 보존되면 서브패스 라우팅도 정상.
+  # 직접 200 본문 검증은 vault-app:80 직결(컨테이너 네트워크)이 필요 → cron 프로브 몫.
+  local out code loc
+  out="$(curl -s -o /dev/null -m 5 -w '%{http_code} %{redirect_url}' "${ALIVE_URL}" 2>/dev/null)" \
+    || { printf '%s' "fail:no_response"; return; }
+  code="${out%% *}"
+  loc="${out#* }"
+  if [[ "${code}" == "200" ]]; then
+    # 직접 200 (예: Caddy 가 직접 서빙) — 본문까지 검증
+    local body
+    body="$(curl -fsS -m 5 "${ALIVE_URL}" 2>/dev/null || true)"
+    if [[ "${body}" == *"${ALIVE_EXPECT_LEGACY}"* ]] || [[ "${body}" =~ ${ALIVE_EXPECT_TS_REGEX} ]]; then
+      printf '%s' "ok:alive"
+    else
+      printf '%s' "degraded:unexpected_body"
+    fi
+  elif [[ "${code}" =~ ^30[1278]$ && "${loc}" =~ /vault/alive(/|[?]|$) ]]; then
+    # Location 의 /vault/alive 뒤에 trailing slash·쿼리스트링이 붙어도 허용.
+    printf '%s' "ok:redirect_${code}"
+  elif [[ "${code}" == "000" ]]; then
     printf '%s' "fail:no_response"
-    return
-  fi
-  if [[ "${body}" == *"${ALIVE_EXPECT_LEGACY}"* ]] \
-       || [[ "${body}" =~ ${ALIVE_EXPECT_TS_REGEX} ]]; then
-    printf '%s' "ok:alive"
   else
-    printf '%s' "degraded:unexpected_body"
+    printf '%s' "degraded:http_${code}"
   fi
 }
 
@@ -104,6 +122,24 @@ probe_admin_token() {
   fi
 }
 
+probe_mcp_session() {
+  # vault-mcp 의 bw 세션 유효성. uvicorn 200 만으로는 세션 사망을 못 잡음 →
+  # /healthz 가 세션 죽으면 503. -f 미사용으로 503 본문(.bw_status)도 회수.
+  # 세션 사망은 Vaultwarden 코어와 무관 → stack-level 은 degraded (down 아님).
+  local out code body
+  out="$(curl -sS -m 15 -w '\n%{http_code}' "${VAULT_MCP_HEALTHZ}" 2>/dev/null)" \
+    || { printf '%s' "degraded:no_response"; return; }
+  code="${out##*$'\n'}"
+  body="${out%$'\n'*}"
+  if [[ "${code}" == "200" ]]; then
+    printf 'ok:%s' "$(printf '%s' "${body}" | jq -r '.bw_status // "unlocked"' 2>/dev/null || echo unlocked)"
+  elif [[ "${code}" == "503" ]]; then
+    printf 'degraded:bw_%s' "$(printf '%s' "${body}" | jq -r '.bw_status // "unknown"' 2>/dev/null || echo unknown)"
+  else
+    printf 'degraded:http_%s' "${code}"
+  fi
+}
+
 # ---- run probes -------------------------------------------------------------
 
 vault_app="$(probe_container vault-app healthy)"
@@ -112,6 +148,7 @@ alive="$(probe_alive)"
 backup="$(probe_backup_fresh)"
 disk="$(probe_disk)"
 admin="$(probe_admin_token)"
+mcp_session="$(probe_mcp_session)"
 
 # ---- aggregate status -------------------------------------------------------
 
@@ -122,7 +159,8 @@ for kv in \
     "alive=${alive}" \
     "backup_fresh=${backup}" \
     "disk_free=${disk}" \
-    "admin_token=${admin}"; do
+    "admin_token=${admin}" \
+    "mcp_session=${mcp_session}"; do
   name="${kv%%=*}"
   val="${kv#*=}"
   case "${val}" in
@@ -167,6 +205,7 @@ jq -cn \
   --arg backup_fresh  "${backup}" \
   --arg disk_free     "${disk}" \
   --arg admin_token   "${admin}" \
+  --arg mcp_session   "${mcp_session}" \
   '{
     ts: $ts,
     status: $status,
@@ -177,7 +216,8 @@ jq -cn \
       alive:        $alive,
       backup_fresh: $backup_fresh,
       disk_free:    $disk_free,
-      admin_token:  $admin_token
+      admin_token:  $admin_token,
+      mcp_session:  $mcp_session
     }
   }'
 

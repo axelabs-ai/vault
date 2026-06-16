@@ -39,11 +39,23 @@ class BwClient:
     # -- public ---------------------------------------------------------
     @classmethod
     def get(cls) -> "BwClient":
+        """싱글톤 접근자 — 세션이 살아있으면 캐시 반환, 아니면 재-boot 시도.
+
+        boot 실패 시 broken 인스턴스를 **캐시하지 않는다**: 다음 호출이 다시
+        boot 를 시도하도록 한다. (2026-06-13 BW_SERVER_URL config drift 로
+        boot 가 실패했는데 broken 싱글톤이 캐시돼 ~한 달간 모든 메타데이터
+        도구가 'bw session not initialised' 로 먹통이던 사고 재발 방지. L5b.)
+        """
         with cls._lock:
-            if cls._instance is None:
-                cls._instance = cls()
-                cls._instance.boot()
-            return cls._instance
+            inst = cls._instance
+            if inst is not None and inst._session:
+                return inst
+            # 미부팅 또는 broken — fresh 인스턴스로 재시도. boot 실패 시 raise
+            # 되고 _instance 는 갱신되지 않아 다음 호출이 다시 시도한다.
+            fresh = cls()
+            fresh.boot()
+            cls._instance = fresh
+            return fresh
 
     def boot(self) -> None:
         self._server_url = os.environ.get("BW_SERVER_URL", "https://vault-caddy:443")
@@ -89,6 +101,49 @@ class BwClient:
 
     def sync(self) -> None:
         self.call("sync")
+
+    def health(self, *, deep: bool = False, timeout: int = 15) -> dict[str, Any]:
+        """bw 세션 liveness 스냅샷 — **절대 raise 하지 않는다**.
+
+        헬스 프로브가 분류(classification)할 수 있도록 모든 실패를 ok=False 로
+        환원한다. uvicorn 이 200 을 돌려줘도 bw 세션이 죽었으면 잡아낸다.
+
+        Returns:
+            {"ok": bool, "bw_status": str, "detail": str}
+
+            bw_status ∈ {unlocked(정상), locked, unauthenticated,
+                         no_session, error, sync_failed, unknown}
+
+            ⚠️ "detail" 은 raw bw stderr·예외 텍스트를 담을 수 있다(secret 마운트
+            경로·서버 URL 등). **인증된 내부 호출 전용** — 인증 면제 경로(/healthz)에
+            그대로 노출 금지. healthz 는 안전한 bw_status enum 만 싣는다.
+
+        Args:
+            deep: True 면 `bw status` 에 더해 `bw sync` 로 **서버 도달성**까지
+                  검증. in-memory 세션이 unlock 상태로 남아 server URL drift 를
+                  마스킹하는 경우(L5b 사고의 본질)를 포착한다.
+        """
+        if not self._session:
+            return {"ok": False, "bw_status": "no_session",
+                    "detail": "session not initialised (boot 실패 추정)"}
+        try:
+            out = self._run(
+                ["bw", "--session", self._session, "status"],
+                allow_fail=True, timeout=timeout,
+            )
+            st = str(json.loads(out).get("status", "unknown"))
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "bw_status": "error",
+                    "detail": f"{type(e).__name__}: {e}"[:200]}
+        if st != "unlocked":
+            return {"ok": False, "bw_status": st, "detail": f"bw status={st}"}
+        if deep:
+            try:
+                self._run(["bw", "--session", self._session, "sync"], timeout=timeout)
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "bw_status": "sync_failed",
+                        "detail": f"{type(e).__name__}: {e}"[:200]}
+        return {"ok": True, "bw_status": st, "detail": "unlocked"}
 
     # -- internal -------------------------------------------------------
     def _configure_server(self) -> None:

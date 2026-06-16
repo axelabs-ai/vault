@@ -64,6 +64,7 @@ def _run_sse_with_auth() -> None:
     import uvicorn
 
     from .auth import BearerAuthMiddleware, get_token
+    from .healthz import HealthEndpoint
 
     token = get_token()
     if not token:
@@ -75,7 +76,11 @@ def _run_sse_with_auth() -> None:
 
     inner_app = mcp.sse_app()
     app = BearerAuthMiddleware(inner_app, token=token)
-    log.info("listening on http://%s:%d (transport=sse)", _HTTP_HOST, _HTTP_PORT)
+    # /healthz·/livez 는 인증 면제 — HealthEndpoint 를 최외곽에 둬 Bearer 앞단에서
+    # 직접 응답한다 (shell 헬스 프로브가 토큰 없이 curl). bw 세션 사망 감지용.
+    app = HealthEndpoint(app)
+    log.info("listening on http://%s:%d (transport=sse, /healthz auth-exempt)",
+             _HTTP_HOST, _HTTP_PORT)
     uvicorn.run(app, host=_HTTP_HOST, port=_HTTP_PORT, log_level="info")
 
 

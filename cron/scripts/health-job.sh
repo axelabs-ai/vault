@@ -8,7 +8,11 @@ set -uo pipefail
 LOGFILE="${VAULT_LOG_DIR}/vault-health.jsonl"
 # vault-app 직접 호출 — Caddy :80 → :443 자동 redirect (308) 우회.
 # vault-app 컨테이너 안 Rocket(Vaultwarden) 이 직접 응답.
-ALIVE_URL="http://${VAULT_CONTAINER}:80/alive"
+# DOMAIN=.../vault 서브패스 mount 이후 /vault/alive 로 서빙 (L5b 드리프트 수정).
+ALIVE_URL="http://${VAULT_CONTAINER}:80/vault/alive"
+# vault-mcp bw 세션 liveness — deep=1 로 bw status + sync 서버 도달성까지 검증.
+# 같은 compose 네트워크라 컨테이너명으로 도달 (L5b 사각지대 메움).
+VAULT_MCP_HEALTHZ="${VAULT_MCP_HEALTHZ:-http://${VAULT_MCP:-vault-mcp}:8772/healthz?deep=1}"
 BACKUP_MAX_AGE_SEC=$((26 * 3600))
 DISK_MIN_FREE_BYTES=$((1024 * 1024 * 1024))   # 1 GiB
 
@@ -72,13 +76,33 @@ probe_disk() {
 }
 
 probe_admin_token() {
-    # Re-verify by probing /admin (any 200/302/401 means Vaultwarden is serving the route).
+    # Re-verify by probing /vault/admin (any 200/302/401 means Vaultwarden serves
+    # the route). /vault 서브패스 mount 반영 (L5b 드리프트 수정).
     local code
-    code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://${VAULT_CONTAINER}:80/admin" || echo 000)
+    code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://${VAULT_CONTAINER}:80/vault/admin" || echo 000)
     if [[ "$code" =~ ^(200|301|302|401)$ ]]; then
         printf 'ok:admin_route_%s' "$code"
     else
         printf 'fail:%s' "$code"
+    fi
+}
+
+probe_mcp_session() {
+    # vault-mcp 의 bw 세션 유효성. uvicorn 이 200 을 줘도 bw 세션이 죽었으면
+    # /healthz 가 503 을 반환한다. -f 미사용: 503 본문(.bw_status)도 회수.
+    # 세션 사망은 Vaultwarden 코어/백업과 무관 → stack-level 은 degraded 로 분류
+    # (down 은 데이터플레인 장애 전용; 사람은 브라우저로 금고 계속 사용 가능).
+    local out code body
+    out=$(curl -sS -m 15 -w '\n%{http_code}' "$VAULT_MCP_HEALTHZ" 2>/dev/null) \
+        || { printf 'degraded:no_response'; return; }
+    code="${out##*$'\n'}"
+    body="${out%$'\n'*}"
+    if [[ "$code" == "200" ]]; then
+        printf 'ok:%s' "$(printf '%s' "$body" | jq -r '.bw_status // "unlocked"' 2>/dev/null || echo unlocked)"
+    elif [[ "$code" == "503" ]]; then
+        printf 'degraded:bw_%s' "$(printf '%s' "$body" | jq -r '.bw_status // "unknown"' 2>/dev/null || echo unknown)"
+    else
+        printf 'degraded:http_%s' "$code"
     fi
 }
 
@@ -88,6 +112,7 @@ alive=$(probe_alive)
 backup=$(probe_backup_fresh)
 disk=$(probe_disk)
 admin=$(probe_admin_token)
+mcp_session=$(probe_mcp_session)
 
 failed=()
 degraded=()
@@ -97,7 +122,8 @@ for kv in \
     "alive=${alive}" \
     "backup_fresh=${backup}" \
     "disk_free=${disk}" \
-    "admin_token=${admin}"; do
+    "admin_token=${admin}" \
+    "mcp_session=${mcp_session}"; do
     name="${kv%%=*}"; val="${kv#*=}"
     case "$val" in
         fail:*)     failed+=("$name") ;;
@@ -127,9 +153,11 @@ JSON=$(jq -nc \
     --arg vault_app "$vault_app" --arg vault_caddy "$vault_caddy" \
     --arg alive "$alive" --arg backup_fresh "$backup" \
     --arg disk_free "$disk" --arg admin_token "$admin" \
+    --arg mcp_session "$mcp_session" \
     '{ts:$ts, status:$status, summary:$summary,
       checks:{vault_app:$vault_app, vault_caddy:$vault_caddy, alive:$alive,
-              backup_fresh:$backup_fresh, disk_free:$disk_free, admin_token:$admin_token}}')
+              backup_fresh:$backup_fresh, disk_free:$disk_free, admin_token:$admin_token,
+              mcp_session:$mcp_session}}')
 
 echo "$JSON" >> "$LOGFILE"
 if [[ "$status" != "ok" ]]; then
