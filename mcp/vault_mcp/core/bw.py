@@ -147,7 +147,13 @@ class BwClient:
 
     # -- internal -------------------------------------------------------
     def _configure_server(self) -> None:
-        # idempotent
+        # bw 는 로그인 상태에서 `config server` 를 거부한다
+        # ("Logout required before server config update"). 이미 로그인돼 있으면
+        # 서버는 이미 설정된 것 → config 재호출을 skip 해야 재시작 시 boot 가
+        # cascade 실패하지 않는다 (진짜 idempotent — 예: Docker 재시작 후 복구).
+        status = self._run(["bw", "status"], allow_fail=True)
+        if '"status":"locked"' in status or '"status":"unlocked"' in status:
+            return
         self._run(["bw", "config", "server", self._server_url or ""])
 
     def _login_and_unlock(self) -> None:
