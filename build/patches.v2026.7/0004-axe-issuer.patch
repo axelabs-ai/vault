@@ -1,0 +1,157 @@
+From c9dc73dda5cf8a634413cacf08454acaf91ca3a3 Mon Sep 17 00:00:00 2001
+From: AXE Labs AI <ai@axellc.com>
+Date: Mon, 10 Aug 2026 21:54:27 +0900
+Subject: [PATCH] =?UTF-8?q?axe:=20=EB=A9=80=ED=8B=B0=ED=85=8C=EB=84=8C?=
+ =?UTF-8?q?=ED=8A=B8=20=EB=94=94=EC=8A=A4=EC=BB=A4=EB=B2=84=EB=A6=AC=20?=
+ =?UTF-8?q?=E2=80=94=20=ED=85=9C=ED=94=8C=EB=A6=BF=20issuer=20=EB=8B=A8?=
+ =?UTF-8?q?=EC=96=B8=EC=9D=84=20=EA=B1=B4=EB=84=88=EB=9B=B4=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`CoreProviderMetadata::discover_async` 는 `metadata.issuer == issuer_url` 를 단언한다.
+Entra 의 `/organizations`·`/common` 문서는 issuer 를 **리터럴 템플릿**
+`https://login.microsoftonline.com/{tenantid}/v2.0` 로 싣기 때문에 그 단언은 구조적으로
+성립할 수 없고, 사용자가 리다이렉트되기도 전에 400 으로 죽는다.
+
+2026-08-10 실사고: 토큰 측 검증 두 곳만 패치하고 배포했더니 SSO 가 AXE 사용자까지
+전면 불가가 됐다. 검증 지점이 셋인데 둘만 고친 것이다 —
+  1. sso.rs decode_token_claims        (0003 에서 처리)
+  2. sso_client.rs claims() 직후        (0003 에서 처리)
+  3. **디스커버리**                     ← 이 커밋
+
+허용목록이 설정된 경우에만 문서를 직접 받아 역직렬화한다(crate 의 비교는
+`discover_async` 안에만 있고 `Deserialize` 에는 없다). 약화가 아니다: 템플릿 issuer 는
+애초에 검증에 쓸 수 없는 값이고, 실제 토큰의 구체 `iss` 는 `issuer_is_accepted` 가
+허용목록으로 다시 검사한다. 허용목록이 비면 기존 `discover_async` 경로 그대로다.
+
+2026-08-11 정정: 위 목록은 셋이 아니라 **넷**이다. 네 번째는 디스커버리가 수행하는
+JWKS 2차 fetch 이고, 그것을 빠뜨린 것이 바로 다음 사고를 냈다 —
+  1. sso.rs decode_token_claims        (0003 에서 처리)
+  2. sso_client.rs claims() 직후        (0003 에서 처리)
+  3. 디스커버리의 issuer 단언            (이 커밋)
+  4. **디스커버리의 JWKS 2차 fetch**    ← 이 커밋 (r3 에서 보강)
+
+`ProviderMetadata.jwks` 필드에는 `#[serde(default = "JsonWebKeySet::default", skip)]` 가
+붙어 있어 문서를 아무리 역직렬화해도 서명키가 채워지지 않는다. `discover_async` 는 문서를
+받은 뒤 `jwks_uri` 를 **한 번 더** 받아 `jwks` 를 채운다 — 디스커버리는 fetch 가 둘이다.
+문서 역직렬화만으로 `discover_async` 를 대체한 r2 는 서명키 0개짜리 클라이언트를 만들었고
+(`Client::from_provider_metadata` 가 `provider_metadata.jwks()` 를 그대로 복사한다), 모든
+id_token 이 `Could not read id_token claims, Signature verification failed` 로 죽어
+2026-08-11 SSO 전면 장애가 됐다(r2 배포 이후 성공 로그인 0건).
+
+수정: 문서 역직렬화 후 crate 자신의 `CoreJsonWebKeySet::fetch_async` 로 `jwks_uri` 를 받아
+`set_jwks` 로 채운다 — `discover_async` 와 같은 경로·같은 파서이고, 앱의 reqwest 클라이언트
+(`OidcHttpClient`)를 그대로 재사용한다. 받아온 키가 0개면 즉시 `Err` 로 실패시킨다.
+회귀했을 때 로그인마다 나오는 오도성 "Signature verification failed" 대신 클라이언트 생성
+시점에 jwks_uri 를 담은 에러로 크게 실패하게 하려는 가드다.
+---
+ src/sso_client.rs | 78 +++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 72 insertions(+), 6 deletions(-)
+
+diff --git a/src/sso_client.rs b/src/sso_client.rs
+index 5e8eb2b1..0638d417 100644
+--- a/src/sso_client.rs
++++ b/src/sso_client.rs
+@@ -8,9 +8,9 @@ use openidconnect::{
+     StandardErrorResponse, StandardTokenResponse, UserInfoClaims,
+     core::{
+         CoreAuthDisplay, CoreAuthPrompt, CoreClientAuthMethod, CoreErrorResponseType, CoreGenderClaim,
+-        CoreIdTokenVerifier, CoreJsonWebKey, CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm,
+-        CoreProviderMetadata, CoreResponseType, CoreRevocableToken, CoreRevocationErrorResponse,
+-        CoreTokenIntrospectionResponse, CoreTokenType,
++        CoreIdTokenVerifier, CoreJsonWebKey, CoreJsonWebKeySet, CoreJweContentEncryptionAlgorithm,
++        CoreJwsSigningAlgorithm, CoreProviderMetadata, CoreResponseType, CoreRevocableToken,
++        CoreRevocationErrorResponse, CoreTokenIntrospectionResponse, CoreTokenType,
+     },
+     http, url,
+ };
+@@ -148,6 +148,54 @@ impl<'c> AsyncHttpClient<'c> for OidcHttpClient {
+     }
+ }
+ 
++/// Fetch `<issuer>/.well-known/openid-configuration` **and the JWKS it advertises**, without
++/// the crate's `metadata.issuer == issuer_url` assertion.
++///
++/// Only reachable when `SSO_ALLOWED_TENANT_IDS` is set (see the call site). Entra's
++/// `/organizations` and `/common` documents name their issuer with a `{tenantid}`
++/// placeholder, so the assertion is structurally unsatisfiable there — skipping it is
++/// the only way to use those endpoints at all. Token issuers are still constrained,
++/// just later and more precisely, by `sso::issuer_is_accepted`.
++///
++/// Discovery is **two** fetches, not one. `ProviderMetadata.jwks` carries `#[serde(skip)]`,
++/// so deserializing the document can never populate the signing keys — `discover_async`
++/// fills them by fetching `jwks_uri` afterwards. Dropping that second fetch builds a client
++/// with zero keys and turns every login into `Signature verification failed`, which is
++/// exactly the 2026-08-11 production SSO outage.
++async fn fetch_provider_metadata_unchecked(
++    issuer_url: &openidconnect::IssuerUrl,
++    http_client: &OidcHttpClient,
++) -> Result<CoreProviderMetadata, String> {
++    let url = format!("{}/.well-known/openid-configuration", issuer_url.as_str().trim_end_matches('/'));
++    let resp = match reqwest::get(&url).await {
++        Ok(r) => r,
++        Err(e) => return Err(format!("GET {url}: {e}")),
++    };
++    if !resp.status().is_success() {
++        return Err(format!("GET {url}: HTTP {}", resp.status()));
++    }
++    let body = match resp.bytes().await {
++        Ok(b) => b,
++        Err(e) => return Err(format!("read {url}: {e}")),
++    };
++    let metadata = serde_json::from_slice::<CoreProviderMetadata>(&body).map_err(|e| format!("parse {url}: {e}"))?;
++
++    // Second fetch — the same call `discover_async` makes once it has the document. Reuse the
++    // crate's own fetcher so the keys are parsed exactly as upstream parses them.
++    let jwks_uri = metadata.jwks_uri().clone();
++    let jwks = match CoreJsonWebKeySet::fetch_async(&jwks_uri, http_client).await {
++        Ok(jwks) => jwks,
++        Err(e) => return Err(format!("GET {jwks_uri}: {e}")),
++    };
++    // A key set that verifies nothing must fail loudly here, not as an opaque
++    // "Signature verification failed" on every subsequent login.
++    if jwks.keys().is_empty() {
++        return Err(format!("GET {jwks_uri}: 0 signing keys — refusing to build a client that cannot verify"));
++    }
++
++    Ok(metadata.set_jwks(jwks))
++}
++
+ impl Client {
+     // Call the OpenId discovery endpoint to retrieve configuration
+     async fn get_client() -> ApiResult<Self> {
+@@ -161,9 +209,27 @@ impl Client {
+             Ok(client) => client,
+         };
+ 
+-        let provider_metadata = match CoreProviderMetadata::discover_async(issuer_url, &http_client).await {
+-            Err(err) => err!(format!("Failed to discover OpenID provider: {err}")),
+-            Ok(metadata) => metadata,
++        // `discover_async` asserts `metadata.issuer == issuer_url`. Entra's multi-tenant
++        // endpoints publish the issuer as the literal template
++        // `https://login.microsoftonline.com/{tenantid}/v2.0`, so that assert can never
++        // hold and discovery 400s before any user is even redirected — which is exactly
++        // what happened on 2026-08-10 when only the token-side checks had been patched.
++        //
++        // With a tenant allow-list configured we run discovery ourselves — document fetch,
++        // deserialize (the crate only compares inside `discover_async`, not in `Deserialize`),
++        // then the JWKS fetch that `discover_async` would have done. This is NOT a weakening:
++        // the templated issuer is unusable for verification anyway, and `issuer_is_accepted`
++        // re-checks the concrete `iss` of every token against the allow-list afterwards.
++        let provider_metadata = if crate::sso::allowed_tenant_ids().is_empty() {
++            match CoreProviderMetadata::discover_async(issuer_url, &http_client).await {
++                Err(err) => err!(format!("Failed to discover OpenID provider: {err}")),
++                Ok(metadata) => metadata,
++            }
++        } else {
++            match fetch_provider_metadata_unchecked(&issuer_url, &http_client).await {
++                Err(err) => err!(format!("Failed to fetch OpenID provider metadata: {err}")),
++                Ok(metadata) => metadata,
++            }
+         };
+ 
+         let auth_methods: Option<HashSet<CoreClientAuthMethod>> = provider_metadata
+-- 
+2.50.1 (Apple Git-155)
+
