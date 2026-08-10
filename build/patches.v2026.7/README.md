@@ -15,6 +15,9 @@
 
 - `0001-axe-collection-access_all-3.patch` — Owner/Admin 의 `users_collections` 행 누락 수정
 - `0003-axe-SSO_ALLOWED_TENANT_IDS-issuer.patch` — 멀티테넌트 SSO (D-ops-89 선결①)
+- `0004-axe-issuer.patch` — 멀티테넌트 디스커버리: issuer 단언 스킵 + **JWKS 2차 fetch**
+
+⚠️ 디스커버리 검증 지점은 **넷**이다: `decode_token_claims` · `claims()` 직후 · 디스커버리 issuer 단언 · **디스커버리의 JWKS 2차 fetch**. 네 번째를 빠뜨린 r2 는 서명키 0개 클라이언트를 만들어 모든 로그인이 `Signature verification failed` 로 죽었다 (2026-08-11 장애, r3 에서 수정 + 빈 JWKS 즉시-실패 가드).
 
 번호가 0002 를 건너뛴다. 그 자리는 **TDE 만료**(`SSO_TRUSTED_DEVICE_EXPIRY_DAYS`, D-ops-74 후속) 몫이고 아직 비어 있다.
 
