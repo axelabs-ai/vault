@@ -26,8 +26,8 @@
 set -euo pipefail
 
 # ---------------- defaults ----------------
-TIMSHEL_REPO="${TIMSHEL_REPO:-https://github.com/Timshel/vaultwarden.git}"
-TIMSHEL_REF="${TIMSHEL_REF:-80439605b9d93973edc283e245ab841c710b1085}"
+TIMSHEL_REPO="${TIMSHEL_REPO:-https://github.com/Timshel/OIDCWarden.git}"
+TIMSHEL_REF="${TIMSHEL_REF:-9214b378f072}"   # v2026.7.0-1
 DB="${DB:-sqlite}"
 CARGO_PROFILE="${CARGO_PROFILE:-release-low}"
 IMAGE_TAG="${IMAGE_TAG:-axelabs-ai/vault:dev}"
@@ -36,7 +36,7 @@ PUSH="${PUSH:-false}"
 
 # ---------------- paths ----------------
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PATCH_DIR="${HERE}/patches"
+PATCH_DIR="${PATCH_DIR:-${HERE}/patches.v2026.7}"
 WORK_DIR="${WORK_DIR:-${HERE}/.work}"
 
 echo "==> Build config"

@@ -1,0 +1,235 @@
+From e971586399233f39e16c36b8308268a0547f65f1 Mon Sep 17 00:00:00 2001
+From: AXE Labs AI <ai@axellc.com>
+Date: Mon, 10 Aug 2026 09:04:48 +0900
+Subject: [PATCH] =?UTF-8?q?axe:=20SSO=5FALLOWED=5FTENANT=5FIDS=20=E2=80=94?=
+ =?UTF-8?q?=20=EB=A9=80=ED=8B=B0=ED=85=8C=EB=84=8C=ED=8A=B8=20issuer=20?=
+ =?UTF-8?q?=EB=A5=BC=20=ED=97=88=EC=9A=A9=EB=AA=A9=EB=A1=9D=EC=9C=BC?=
+ =?UTF-8?q?=EB=A1=9C=20=EC=A2=81=ED=98=80=EC=84=9C=20=EB=B0=9B=EB=8A=94?=
+ =?UTF-8?q?=EB=8B=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Entra 의 `/organizations`·`/common` 엔드포인트는 issuer 를 **템플릿**으로 광고한다
+(`.../{tenantid}/v2.0`). 실제 토큰은 구체 테넌트 guid 를 실어 오므로 문자열 비교는
+영원히 실패하고, authority 를 멀티테넌트로 바꾸는 순간 **전원 로그인이 끊긴다**.
+
+`SSO_ALLOWED_TENANT_IDS` 를 도입해 그 토큰을 **명시된 테넌트일 때만** 받는다.
+
+기본값이 빈 목록이고 그때는 `iss == SSO_AUTHORITY` 정확 일치로 남는다 — 즉 설정을
+안 건드리면 동작이 종전과 바이트 단위로 같다. 그리고 목록이 비어 있으면 멀티테넌트
+authority 를 켜도 아무도 통과하지 못한다: **엔드포인트를 여는 것과 테넌트를 들이는
+것을 분리**해, 목록 없이 켰다가 인터넷의 모든 Entra 테넌트를 받아들이는 사고를
+구조적으로 막는다.
+
+치환은 테넌트 자리 하나로 제한한다. authority 의 스킴·호스트·버전 접미사가 모두
+그대로 일치해야 하므로, 이 경로로 다른 IdP 의 issuer 를 통과시킬 수 없다.
+
+검증 지점이 둘이라 **둘을 한 커밋에** 넣는다:
+  · `sso.rs:decode_token_claims` — 수동 비교를 `issuer_is_accepted` 로 교체
+  · `sso_client.rs` — 허용목록이 있을 때만 crate 의 `require_issuer_match(false)`.
+    끄기만 하면 id_token 이 **아무 issuer 에서나** 통과해 출발점보다 나빠지므로,
+    `claims()` 직후 같은 판정을 다시 건다.
+
+테스트 4건: 빈 목록=정확일치 회귀 · 목록 내 테넌트 통과 · 목록 밖 거부 ·
+접두/접미 불일치(타 IdP·경로주입) 거부.
+---
+ src/config.rs     |   2 +
+ src/sso.rs        | 121 +++++++++++++++++++++++++++++++++++++++++++++-
+ src/sso_client.rs |  17 +++++++
+ 3 files changed, 139 insertions(+), 1 deletion(-)
+
+diff --git a/src/config.rs b/src/config.rs
+index 7f37273..b9fd50f 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -825,6 +825,8 @@ make_config! {
+         sso_pkce:                       bool,   true,   def,    true;
+         /// Regex for additional trusted Id token audience |> By default only the client_id is trusted.
+         sso_audience_trusted:           String, true,  option;
++        /// Comma separated Entra tenant ids accepted when SSO_AUTHORITY is a multi-tenant endpoint |> Empty = single-issuer strict match (default).
++        sso_allowed_tenant_ids:         String, true,  def,    String::new();
+         /// CallBack Path |> Generated from Domain.
+         sso_callback_path:              String, true,  generated, |c| generate_sso_callback_path(&c.domain);
+         /// Optional SSO master password policy |> Ex format: '{"enforceOnLogin":false,"minComplexity":3,"minLength":12,"requireLower":false,"requireNumbers":false,"requireSpecial":false,"requireUpper":false}'
+diff --git a/src/sso.rs b/src/sso.rs
+index 4a4398e..93887cf 100644
+--- a/src/sso.rs
++++ b/src/sso.rs
+@@ -157,6 +157,67 @@ impl BasicTokenClaims {
+     }
+ }
+ 
++/// Comma separated allow-list of Entra tenant ids (`SSO_ALLOWED_TENANT_IDS`).
++/// Empty = feature off, issuer must match `SSO_AUTHORITY` exactly (previous behaviour).
++pub fn allowed_tenant_ids() -> Vec<String> {
++    CONFIG
++        .sso_allowed_tenant_ids()
++        .split(',')
++        .map(|t| t.trim().to_lowercase())
++        .filter(|t| !t.is_empty())
++        .collect()
++}
++
++/// Is this `iss` acceptable?
++///
++/// Exact match against `SSO_AUTHORITY` is always accepted — that is the single-tenant
++/// contract and stays untouched.
++///
++/// Multi-tenant is opt-in and *narrow*: Entra's `/organizations` and `/common`
++/// endpoints advertise a **templated** issuer (`.../{tenantid}/v2.0`) while real
++/// tokens carry the concrete tenant guid, so a strict comparison can never match and
++/// every login fails. We accept such a token only when its tenant id is in the
++/// operator's allow-list. The allow-list is mandatory by construction: with it empty
++/// this function degrades to the exact match above, so enabling the multi-tenant
++/// endpoint without naming tenants does not silently admit every Entra tenant on the
++/// internet.
++pub fn issuer_is_accepted(iss: &str) -> bool {
++    let authority = CONFIG.sso_authority();
++    if iss == authority {
++        return true;
++    }
++    let allowed = allowed_tenant_ids();
++    if allowed.is_empty() {
++        return false;
++    }
++    // Only rewrite the tenant segment of the configured authority — everything else
++    // (scheme, host, version suffix) must still match, so this cannot be used to
++    // accept an issuer from some other identity provider entirely.
++    let Some((prefix, suffix)) = split_multi_tenant_authority(&authority) else {
++        return false;
++    };
++    let Some(rest) = iss.strip_prefix(&prefix) else {
++        return false;
++    };
++    let Some(tenant) = rest.strip_suffix(&suffix) else {
++        return false;
++    };
++    !tenant.is_empty() && !tenant.contains('/') && allowed.contains(&tenant.to_lowercase())
++}
++
++/// Split `https://host/{organizations|common}/v2.0` into the parts around the tenant
++/// segment. `None` when the authority is not a multi-tenant endpoint.
++fn split_multi_tenant_authority(authority: &str) -> Option<(String, String)> {
++    for marker in ["/organizations", "/common"] {
++        if let Some(idx) = authority.rfind(marker) {
++            let prefix = format!("{}/", &authority[..idx]);
++            let suffix = authority[idx + marker.len()..].to_string();
++            return Some((prefix, suffix));
++        }
++    }
++    None
++}
++
+ fn decode_token_claims(token_name: &str, token: &str) -> ApiResult<BasicTokenClaims> {
+     // We need to manually validate this token, since `insecure_decode` does not do this
+     match jsonwebtoken::dangerous::insecure_decode::<BasicTokenClaimsValidation>(token) {
+@@ -167,7 +228,7 @@ fn decode_token_claims(token_name: &str, token: &str) -> ApiResult<BasicTokenCla
+             if validate_claim.exp < now - 60 {
+                 err_silent!(format!("Expired Signature for base token claim from {token_name}"))
+             }
+-            if validate_claim.iss.ne(&CONFIG.sso_authority()) {
++            if !issuer_is_accepted(&validate_claim.iss) {
+                 err_silent!(format!("Invalid Issuer for base token claim from {token_name}"))
+             }
+ 
+@@ -929,3 +990,61 @@ mod tests {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod axe_issuer_tests {
++    // `issuer_is_accepted` 는 인증 경계다. 여기서 고정하는 성질은 세 가지:
++    //   1. 허용목록이 비면 **종전 동작**(정확 일치)으로 남는다 — 회귀 없음
++    //   2. 멀티테넌트 엔드포인트라도 목록에 없는 테넌트는 거부 — 켜는 것이 곧 개방이 아니다
++    //   3. 테넌트 자리만 치환한다 — 다른 IdP 의 issuer 를 통과시키는 데 쓸 수 없다
++    use super::*;
++
++    fn with(authority: &str, allowed: &str, iss: &str) -> bool {
++        // CONFIG 를 건드리지 않고 순수 로직만 검증하려고 같은 규칙을 재구성한다.
++        if iss == authority {
++            return true;
++        }
++        let allowed: Vec<String> =
++            allowed.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect();
++        if allowed.is_empty() {
++            return false;
++        }
++        let Some((prefix, suffix)) = split_multi_tenant_authority(authority) else {
++            return false;
++        };
++        let Some(rest) = iss.strip_prefix(&prefix) else { return false };
++        let Some(tenant) = rest.strip_suffix(&suffix) else { return false };
++        !tenant.is_empty() && !tenant.contains('/') && allowed.contains(&tenant.to_lowercase())
++    }
++
++    const AXE: &str = "https://login.microsoftonline.com/122fb574-7efa-476a-95b6-bee81bce2cce/v2.0";
++    const ORGS: &str = "https://login.microsoftonline.com/organizations/v2.0";
++    const RC: &str = "https://login.microsoftonline.com/381cc823-2bb2-43a7-9a27-68ea3afacdff/v2.0";
++
++    #[test]
++    fn empty_allowlist_keeps_strict_single_issuer() {
++        assert!(with(AXE, "", AXE));
++        assert!(!with(AXE, "", RC));
++        // 멀티테넌트 authority 라도 목록이 비면 아무도 못 들어온다.
++        assert!(!with(ORGS, "", RC));
++    }
++
++    #[test]
++    fn listed_tenant_passes_on_a_multi_tenant_authority() {
++        assert!(with(ORGS, "381cc823-2bb2-43a7-9a27-68ea3afacdff", RC));
++        assert!(with(ORGS, "122fb574-7efa-476a-95b6-bee81bce2cce, 381cc823-2bb2-43a7-9a27-68ea3afacdff", AXE));
++    }
++
++    #[test]
++    fn unlisted_tenant_is_rejected() {
++        assert!(!with(ORGS, "122fb574-7efa-476a-95b6-bee81bce2cce", RC));
++    }
++
++    #[test]
++    fn tenant_substitution_cannot_reach_another_provider() {
++        // 목록에 있어도 호스트가 다르면 거부 — 접두/접미가 함께 일치해야 한다.
++        assert!(!with(ORGS, "evil", "https://evil.example.com/evil/v2.0"));
++        // 경로 주입으로 접미사를 맞추려는 시도.
++        assert!(!with(ORGS, "a", "https://login.microsoftonline.com/a/b/v2.0"));
++    }
++}
+diff --git a/src/sso_client.rs b/src/sso_client.rs
+index 51980f0..5e8eb2b 100644
+--- a/src/sso_client.rs
++++ b/src/sso_client.rs
+@@ -312,6 +312,16 @@ impl Client {
+                     }
+                 };
+ 
++                // `vw_id_token_verifier` turns the crate's issuer check OFF when a tenant
++                // allow-list is configured (it cannot match Entra's templated multi-tenant
++                // issuer). Replacing it here is not optional: without this the id_token
++                // would be accepted from ANY issuer, which is strictly worse than the
++                // single-tenant behaviour we started from.
++                if !crate::sso::issuer_is_accepted(id_claims.issuer().as_str()) {
++                    Self::invalidate();
++                    err!(format!("Invalid Issuer in id_token: {}", id_claims.issuer().as_str()));
++                }
++
+                 Ok((token_response, id_claims))
+             }
+         }
+@@ -339,6 +349,13 @@ impl Client {
+ 
+     pub fn vw_id_token_verifier(&self) -> CoreIdTokenVerifier<'_> {
+         let mut verifier = self.core_client.id_token_verifier();
++        // Entra's `/organizations` metadata advertises `.../{tenantid}/v2.0` verbatim, so
++        // the crate's string comparison against it can never match a real token. Hand the
++        // decision to `issuer_is_accepted` — which the caller MUST run right after
++        // `claims()` (see exchange_code). Off by default: no allow-list, no change.
++        if !crate::sso::allowed_tenant_ids().is_empty() {
++            verifier = verifier.require_issuer_match(false);
++        }
+         if let Some(regex_str) = CONFIG.sso_audience_trusted() {
+             match Regex::new(&regex_str) {
+                 Ok(regex) => {
+-- 
+2.50.1 (Apple Git-155)
+
