@@ -7,13 +7,12 @@
 | 0001 `prelogin/password` 라우트 별칭 | 상류에 존재 | 폐기 |
 | 0002 AccountKeys / MasterPasswordUnlock | `identity.rs`·`accounts.rs`·신규 `user_decryption.rs` 에 존재 | 폐기 |
 | 0004 cipher `permissions` | 상류에 존재 | 폐기 |
-| 0003 `access_all` 스킵 제거 | 3곳 잔존 | **재작성 → 0001** |
+| 0003 `access_all` 스킵 제거 | 판정부가 이미 access_all 존중(2020~2025 계보) — 전제가 당시에도 거짓 | **폐기** (2026-08-13 리뷰 라운드1) |
 
 ⚠️ `git apply --check` 실패를 "흡수됨" 으로 읽지 말 것. 컨텍스트 드리프트와 흡수는 다르다 — 반드시 **목적 기준 grep** 으로 확인한다. 위 표가 그 방식으로 만들어졌다.
 
 ## 현재 시리즈
 
-- `0001-axe-collection-access_all-3.patch` — Owner/Admin 의 `users_collections` 행 누락 수정
 - `0003-axe-SSO_ALLOWED_TENANT_IDS-issuer.patch` — 멀티테넌트 SSO (D-ops-89 선결①)
 - `0004-axe-issuer.patch` — 멀티테넌트 디스커버리: issuer 단언 스킵 + **JWKS 2차 fetch**
 
