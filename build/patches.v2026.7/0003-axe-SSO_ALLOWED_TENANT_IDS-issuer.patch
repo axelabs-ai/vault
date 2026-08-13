@@ -1,4 +1,4 @@
-From e971586399233f39e16c36b8308268a0547f65f1 Mon Sep 17 00:00:00 2001
+From 8555cc9492dc346eb978f8ba77323a8226491ca0 Mon Sep 17 00:00:00 2001
 From: AXE Labs AI <ai@axellc.com>
 Date: Mon, 10 Aug 2026 09:04:48 +0900
 Subject: [PATCH] =?UTF-8?q?axe:=20SSO=5FALLOWED=5FTENANT=5FIDS=20=E2=80=94?=
@@ -33,14 +33,27 @@ authority 를 켜도 아무도 통과하지 못한다: **엔드포인트를 여�
 
 테스트 4건: 빈 목록=정확일치 회귀 · 목록 내 테넌트 통과 · 목록 밖 거부 ·
 접두/접미 불일치(타 IdP·경로주입) 거부.
+
+2026-08-13 리뷰 라운드1 반영 — finding `issuer-tests-exercise-duplicate-helper`:
+
+테스트 4건이 모듈 안 `with` 헬퍼에 판정 규칙을 **복제**해 두고 그 사본을 검증했다.
+`issuer_is_accepted` 가 퇴화해도 사본은 멀쩡하니 4건 전부 초록으로 남는다 —
+인증 경계를 지킨다는 테스트가 정작 배포되는 함수를 한 번도 부르지 않았다.
+
+CONFIG 를 읽지 않는 순수 함수 `issuer_matches(authority, allowed, iss)` 로 판정을
+빼내고 `issuer_is_accepted` 는 CONFIG 두 값을 넘기는 한 줄 래퍼로 남긴다. 허용목록
+파싱도 `parse_tenant_ids` 로 분리해 테스트가 서버와 같은 trim/lowercase 를 탄다.
+`with` 는 이제 인자 전달뿐 — 판정 규칙을 한 줄도 다시 쓰지 않는다.
+
+동작 불변(순수 리팩터링). 테스트 4건 그대로 통과.
 ---
  src/config.rs     |   2 +
- src/sso.rs        | 121 +++++++++++++++++++++++++++++++++++++++++++++-
+ src/sso.rs        | 117 +++++++++++++++++++++++++++++++++++++++++++++-
  src/sso_client.rs |  17 +++++++
- 3 files changed, 139 insertions(+), 1 deletion(-)
+ 3 files changed, 135 insertions(+), 1 deletion(-)
 
 diff --git a/src/config.rs b/src/config.rs
-index 7f37273..b9fd50f 100644
+index 7f372736..b9fd50f7 100644
 --- a/src/config.rs
 +++ b/src/config.rs
 @@ -825,6 +825,8 @@ make_config! {
@@ -53,22 +66,24 @@ index 7f37273..b9fd50f 100644
          sso_callback_path:              String, true,  generated, |c| generate_sso_callback_path(&c.domain);
          /// Optional SSO master password policy |> Ex format: '{"enforceOnLogin":false,"minComplexity":3,"minLength":12,"requireLower":false,"requireNumbers":false,"requireSpecial":false,"requireUpper":false}'
 diff --git a/src/sso.rs b/src/sso.rs
-index 4a4398e..93887cf 100644
+index 4a4398e6..8a08e763 100644
 --- a/src/sso.rs
 +++ b/src/sso.rs
-@@ -157,6 +157,67 @@ impl BasicTokenClaims {
+@@ -157,6 +157,74 @@ impl BasicTokenClaims {
      }
  }
  
++/// Parse the comma separated `SSO_ALLOWED_TENANT_IDS` value. Split out from
++/// `allowed_tenant_ids` so the tests can build an allow-list without CONFIG and still
++/// go through the same trimming/lowercasing the running server does.
++fn parse_tenant_ids(raw: &str) -> Vec<String> {
++    raw.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect()
++}
++
 +/// Comma separated allow-list of Entra tenant ids (`SSO_ALLOWED_TENANT_IDS`).
 +/// Empty = feature off, issuer must match `SSO_AUTHORITY` exactly (previous behaviour).
 +pub fn allowed_tenant_ids() -> Vec<String> {
-+    CONFIG
-+        .sso_allowed_tenant_ids()
-+        .split(',')
-+        .map(|t| t.trim().to_lowercase())
-+        .filter(|t| !t.is_empty())
-+        .collect()
++    parse_tenant_ids(&CONFIG.sso_allowed_tenant_ids())
 +}
 +
 +/// Is this `iss` acceptable?
@@ -85,18 +100,23 @@ index 4a4398e..93887cf 100644
 +/// endpoint without naming tenants does not silently admit every Entra tenant on the
 +/// internet.
 +pub fn issuer_is_accepted(iss: &str) -> bool {
-+    let authority = CONFIG.sso_authority();
++    issuer_matches(&CONFIG.sso_authority(), &allowed_tenant_ids(), iss)
++}
++
++/// The decision itself, with no CONFIG in it. `issuer_is_accepted` is the thin wrapper that
++/// supplies the configured values; the tests call this directly so they exercise the code
++/// that ships rather than a copy of its rules.
++fn issuer_matches(authority: &str, allowed: &[String], iss: &str) -> bool {
 +    if iss == authority {
 +        return true;
 +    }
-+    let allowed = allowed_tenant_ids();
 +    if allowed.is_empty() {
 +        return false;
 +    }
 +    // Only rewrite the tenant segment of the configured authority — everything else
 +    // (scheme, host, version suffix) must still match, so this cannot be used to
 +    // accept an issuer from some other identity provider entirely.
-+    let Some((prefix, suffix)) = split_multi_tenant_authority(&authority) else {
++    let Some((prefix, suffix)) = split_multi_tenant_authority(authority) else {
 +        return false;
 +    };
 +    let Some(rest) = iss.strip_prefix(&prefix) else {
@@ -124,7 +144,7 @@ index 4a4398e..93887cf 100644
  fn decode_token_claims(token_name: &str, token: &str) -> ApiResult<BasicTokenClaims> {
      // We need to manually validate this token, since `insecure_decode` does not do this
      match jsonwebtoken::dangerous::insecure_decode::<BasicTokenClaimsValidation>(token) {
-@@ -167,7 +228,7 @@ fn decode_token_claims(token_name: &str, token: &str) -> ApiResult<BasicTokenCla
+@@ -167,7 +235,7 @@ fn decode_token_claims(token_name: &str, token: &str) -> ApiResult<BasicTokenCla
              if validate_claim.exp < now - 60 {
                  err_silent!(format!("Expired Signature for base token claim from {token_name}"))
              }
@@ -133,7 +153,7 @@ index 4a4398e..93887cf 100644
                  err_silent!(format!("Invalid Issuer for base token claim from {token_name}"))
              }
  
-@@ -929,3 +990,61 @@ mod tests {
+@@ -929,3 +997,50 @@ mod tests {
          );
      }
  }
@@ -146,22 +166,11 @@ index 4a4398e..93887cf 100644
 +    //   3. 테넌트 자리만 치환한다 — 다른 IdP 의 issuer 를 통과시키는 데 쓸 수 없다
 +    use super::*;
 +
++    /// `issuer_is_accepted` 에서 CONFIG 두 값을 빼면 남는 것이 `issuer_matches` 다.
++    /// 여기서는 그 둘을 인자로 넣어줄 뿐, 판정 규칙은 한 줄도 다시 쓰지 않는다 —
++    /// 규칙을 복제하면 테스트는 사본을 통과시키고 배포본은 틀릴 수 있다.
 +    fn with(authority: &str, allowed: &str, iss: &str) -> bool {
-+        // CONFIG 를 건드리지 않고 순수 로직만 검증하려고 같은 규칙을 재구성한다.
-+        if iss == authority {
-+            return true;
-+        }
-+        let allowed: Vec<String> =
-+            allowed.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect();
-+        if allowed.is_empty() {
-+            return false;
-+        }
-+        let Some((prefix, suffix)) = split_multi_tenant_authority(authority) else {
-+            return false;
-+        };
-+        let Some(rest) = iss.strip_prefix(&prefix) else { return false };
-+        let Some(tenant) = rest.strip_suffix(&suffix) else { return false };
-+        !tenant.is_empty() && !tenant.contains('/') && allowed.contains(&tenant.to_lowercase())
++        issuer_matches(authority, &parse_tenant_ids(allowed), iss)
 +    }
 +
 +    const AXE: &str = "https://login.microsoftonline.com/122fb574-7efa-476a-95b6-bee81bce2cce/v2.0";
@@ -196,7 +205,7 @@ index 4a4398e..93887cf 100644
 +    }
 +}
 diff --git a/src/sso_client.rs b/src/sso_client.rs
-index 51980f0..5e8eb2b 100644
+index 51980f08..5e8eb2b1 100644
 --- a/src/sso_client.rs
 +++ b/src/sso_client.rs
 @@ -312,6 +312,16 @@ impl Client {

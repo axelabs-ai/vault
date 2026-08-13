@@ -1,4 +1,4 @@
-From c9dc73dda5cf8a634413cacf08454acaf91ca3a3 Mon Sep 17 00:00:00 2001
+From 3492d6b66aa431ffa6fb0c6042bcb7330cf399f2 Mon Sep 17 00:00:00 2001
 From: AXE Labs AI <ai@axellc.com>
 Date: Mon, 10 Aug 2026 21:54:27 +0900
 Subject: [PATCH] =?UTF-8?q?axe:=20=EB=A9=80=ED=8B=B0=ED=85=8C=EB=84=8C?=
@@ -45,12 +45,26 @@ id_token 이 `Could not read id_token claims, Signature verification failed` 로
 (`OidcHttpClient`)를 그대로 재사용한다. 받아온 키가 0개면 즉시 `Err` 로 실패시킨다.
 회귀했을 때 로그인마다 나오는 오도성 "Signature verification failed" 대신 클라이언트 생성
 시점에 jwks_uri 를 담은 에러로 크게 실패하게 하려는 가드다.
+
+2026-08-13 리뷰 라운드1 반영 — finding `unchecked-discovery-bypasses-oidc-http-client`:
+
+문서 fetch 만 bare `reqwest::get` 이었다. JWKS 는 `OidcHttpClient` 를 타는데 문서는
+기본 클라이언트를 새로 띄워, 이 요청 하나만 앱의 타임아웃·프록시·TLS·리다이렉트
+정책 밖으로 빠져나갔다. 인자로 받은 `http_client` 를 정작 문서 fetch 에는 안 쓴 것이다.
+
+두 fetch 를 모두 `OidcHttpClient` 로 통일한다: crate 의 `discovery_request` 가 만드는
+것과 같은 요청(GET + `Accept: application/json`)을 `AsyncHttpClient::call` 로 보낸다.
+URL 도 crate 와 같은 `IssuerUrl::join` 으로 만든다 — 손으로 자르던 trim/format 제거.
+이제 `discover_async` 와 다른 것은 issuer 단언 하나뿐이고, 그것이 이 함수의 전부다.
+
+빈-JWKS 가드와 에러 문구는 유지. 본문 읽기 실패가 `call` 안으로 흡수되어
+`read {url}` 갈래만 사라진다.
 ---
- src/sso_client.rs | 78 +++++++++++++++++++++++++++++++++++++++++++----
- 1 file changed, 72 insertions(+), 6 deletions(-)
+ src/sso_client.rs | 86 +++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 80 insertions(+), 6 deletions(-)
 
 diff --git a/src/sso_client.rs b/src/sso_client.rs
-index 5e8eb2b1..0638d417 100644
+index 5e8eb2b1..9f81463f 100644
 --- a/src/sso_client.rs
 +++ b/src/sso_client.rs
 @@ -8,9 +8,9 @@ use openidconnect::{
@@ -66,7 +80,7 @@ index 5e8eb2b1..0638d417 100644
      },
      http, url,
  };
-@@ -148,6 +148,54 @@ impl<'c> AsyncHttpClient<'c> for OidcHttpClient {
+@@ -148,6 +148,62 @@ impl<'c> AsyncHttpClient<'c> for OidcHttpClient {
      }
  }
  
@@ -88,19 +102,27 @@ index 5e8eb2b1..0638d417 100644
 +    issuer_url: &openidconnect::IssuerUrl,
 +    http_client: &OidcHttpClient,
 +) -> Result<CoreProviderMetadata, String> {
-+    let url = format!("{}/.well-known/openid-configuration", issuer_url.as_str().trim_end_matches('/'));
-+    let resp = match reqwest::get(&url).await {
++    // Same URL the crate builds (`IssuerUrl::join`), and — importantly — the same transport
++    // as every other OIDC call. A bare `reqwest::get` would spin up the default client and
++    // silently opt out of our timeouts, proxy and TLS policy for this one request.
++    let url = issuer_url
++        .join(".well-known/openid-configuration")
++        .map_err(|e| format!("build discovery url for {}: {e}", issuer_url.as_str()))?;
++    let request = http::Request::builder()
++        .uri(url.to_string())
++        .method(http::Method::GET)
++        .header(http::header::ACCEPT, http::HeaderValue::from_static("application/json"))
++        .body(Vec::new())
++        .map_err(|e| format!("GET {url}: {e}"))?;
++    let resp = match http_client.call(request).await {
 +        Ok(r) => r,
 +        Err(e) => return Err(format!("GET {url}: {e}")),
 +    };
 +    if !resp.status().is_success() {
 +        return Err(format!("GET {url}: HTTP {}", resp.status()));
 +    }
-+    let body = match resp.bytes().await {
-+        Ok(b) => b,
-+        Err(e) => return Err(format!("read {url}: {e}")),
-+    };
-+    let metadata = serde_json::from_slice::<CoreProviderMetadata>(&body).map_err(|e| format!("parse {url}: {e}"))?;
++    let metadata =
++        serde_json::from_slice::<CoreProviderMetadata>(resp.body()).map_err(|e| format!("parse {url}: {e}"))?;
 +
 +    // Second fetch — the same call `discover_async` makes once it has the document. Reuse the
 +    // crate's own fetcher so the keys are parsed exactly as upstream parses them.
@@ -121,7 +143,7 @@ index 5e8eb2b1..0638d417 100644
  impl Client {
      // Call the OpenId discovery endpoint to retrieve configuration
      async fn get_client() -> ApiResult<Self> {
-@@ -161,9 +209,27 @@ impl Client {
+@@ -161,9 +217,27 @@ impl Client {
              Ok(client) => client,
          };
  
