@@ -56,6 +56,12 @@
 html:root {
   // 배포 마커. Compressed 컴파일이 주석을 지우므로 실선언으로 남긴다.
   --axe-theme: "0.1.0 axe-theme 2026-08-13 axe-ui-0.28.0";
+  // 리비전 스탬프. `deploy-theme.sh` 가 업로드 직전 이 자리에 **이 파일의**
+  // sha256 앞 8자를 박고, 배포 후 origin/CDN 응답에서 그 값을 그대로 찾는다.
+  // 위 `--axe-theme` 는 값이 상수라 구버전 응답도 통과시킨다 — 그래서 매
+  // 배포마다 달라지는 이 값이 실제 stale 판별자다. 리터럴로 커밋되는 것은
+  // placeholder 이고, 치환은 업로드본(작업 사본)에서만 일어난다.
+  --axe-theme-rev: "__AXE_THEME_REV__";
 
   // ---- 타이포 ----
   // @axe/ui 본문 = Pretendard Variable, mono = Sarasa Fixed K. 둘 다 소비자

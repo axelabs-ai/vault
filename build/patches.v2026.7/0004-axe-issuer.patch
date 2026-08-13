@@ -1,4 +1,4 @@
-From 3492d6b66aa431ffa6fb0c6042bcb7330cf399f2 Mon Sep 17 00:00:00 2001
+From 02a9060f395d1aa063d8c220e65f1301396fbcc2 Mon Sep 17 00:00:00 2001
 From: AXE Labs AI <ai@axellc.com>
 Date: Mon, 10 Aug 2026 21:54:27 +0900
 Subject: [PATCH] =?UTF-8?q?axe:=20=EB=A9=80=ED=8B=B0=ED=85=8C=EB=84=8C?=
@@ -59,12 +59,101 @@ URL 도 crate 와 같은 `IssuerUrl::join` 으로 만든다 — 손으로 자르
 
 빈-JWKS 가드와 에러 문구는 유지. 본문 읽기 실패가 `call` 안으로 흡수되어
 `read {url}` 갈래만 사라진다.
----
- src/sso_client.rs | 86 +++++++++++++++++++++++++++++++++++++++++++----
- 1 file changed, 80 insertions(+), 6 deletions(-)
 
+2026-08-13 리뷰 라운드2 반영 — finding `discovery-url-drops-v2-segment`,
+`unchecked-discovery-not-limited-or-validated`:
+
+**URL 조립 명시화.** 디스커버리 URL 을 `discovery_url()` 순수 함수로 빼고
+`format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/'))` 로
+명시 조립한다. `/organizations/v2.0` · `/common/v2.0` · 단일테넌트 · trailing-slash
+네 케이스의 정확한 URL 을 단언하는 테스트를 붙였다. (실측: `IssuerUrl::join` 은
+상대참조 해석이 아니라 문자열 append 라 v2.0 유실은 실제로 없었다 — `Url::join`
+이었다면 `/organizations/.well-known/...` 로 v1 을 받는다. 이름이 그 차이를 말해
+주지 않으므로 조립을 코드에 드러내고 테스트로 고정한다.)
+
+**우회 게이트 2겹.** 종전엔 허용목록이 비지 않았다는 것만으로 crate 의 issuer
+바인딩을 껐다 — Google·Keycloak·단일테넌트 Entra 처럼 우회할 이유가 없는
+authority 에서도 꺼졌다. 이제 (1) 허용목록 non-empty **그리고** (2)
+`multi_tenant_issuer_template(authority)` 가 `Some` 일 때만 우회한다. 그 함수는
+`issuer_is_accepted` 와 같은 `split_multi_tenant_authority` 를 재사용하므로 두
+경로가 인정하는 authority 집합이 갈라질 수 없다.
+
+**문서 issuer 바인딩.** 건너뛴 단언을 빈칸으로 두지 않는다. 받은 메타데이터의
+`issuer` 가 템플릿(`{prefix}{tenantid}{suffix}`)과 **정확히** 일치해야 하고,
+아니면 `Err`. 이게 없으면 그 URL 에 응답한 아무 문서나 자기 `jwks_uri` 를 심을 수
+있고, id_token 서명은 바로 그 문서의 키로 검증되므로 토큰 측 `issuer_is_accepted`
+는 동등한 바인딩이 아니다. `IssuerUrl` 이 원문 문자열을 보존하므로 리터럴
+`{tenantid}` 가 percent-encoding 없이 남아 정확 비교가 성립한다(실측).
+
+테스트 4건 추가(URL 2건 · 템플릿 2건). 전체 38 passed.
+---
+ src/sso.rs        |  46 ++++++++++++++
+ src/sso_client.rs | 150 ++++++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 190 insertions(+), 6 deletions(-)
+
+diff --git a/src/sso.rs b/src/sso.rs
+index 8a08e763..985c5240 100644
+--- a/src/sso.rs
++++ b/src/sso.rs
+@@ -212,6 +212,18 @@ fn issuer_matches(authority: &str, allowed: &[String], iss: &str) -> bool {
+     !tenant.is_empty() && !tenant.contains('/') && allowed.contains(&tenant.to_lowercase())
+ }
+ 
++/// The issuer a multi-tenant Entra authority advertises in its own discovery document:
++/// the configured authority with the tenant segment replaced by Entra's **literal**
++/// `{tenantid}` placeholder (it really is those nine characters in the JSON, not a value).
++///
++/// `None` when the authority is not one of Entra's multi-tenant endpoints — which is also
++/// the signal that the discovery bypass in `sso_client` must stay off, since there is then
++/// no template to bind the document to and no reason to skip the crate's own check.
++pub fn multi_tenant_issuer_template(authority: &str) -> Option<String> {
++    let (prefix, suffix) = split_multi_tenant_authority(authority)?;
++    Some(format!("{prefix}{{tenantid}}{suffix}"))
++}
++
+ /// Split `https://host/{organizations|common}/v2.0` into the parts around the tenant
+ /// segment. `None` when the authority is not a multi-tenant endpoint.
+ fn split_multi_tenant_authority(authority: &str) -> Option<(String, String)> {
+@@ -1044,3 +1056,37 @@ mod axe_issuer_tests {
+         assert!(!with(ORGS, "a", "https://login.microsoftonline.com/a/b/v2.0"));
+     }
+ }
++
++#[cfg(test)]
++mod axe_issuer_template_tests {
++    // `multi_tenant_issuer_template` 는 두 몫을 한다:
++    //   1. 게이트 — `None` 이면 sso_client 가 crate 의 `discover_async` 를 그대로 쓴다
++    //   2. 바인딩 — `Some` 이면 그 문자열이 디스커버리 문서 issuer 의 유일한 합격값
++    // 둘 다 `issuer_is_accepted` 와 **같은** split 을 쓰므로, 통과하는 authority 집합이
++    // 두 함수에서 갈라질 수 없다.
++    use super::*;
++
++    #[test]
++    fn entra_multi_tenant_authorities_yield_the_placeholder_issuer() {
++        assert_eq!(
++            multi_tenant_issuer_template("https://login.microsoftonline.com/organizations/v2.0").as_deref(),
++            Some("https://login.microsoftonline.com/{tenantid}/v2.0")
++        );
++        assert_eq!(
++            multi_tenant_issuer_template("https://login.microsoftonline.com/common/v2.0").as_deref(),
++            Some("https://login.microsoftonline.com/{tenantid}/v2.0")
++        );
++    }
++
++    #[test]
++    fn single_tenant_and_foreign_authorities_have_no_template() {
++        // 단일 테넌트 authority — 우회할 이유가 없다.
++        assert_eq!(
++            multi_tenant_issuer_template("https://login.microsoftonline.com/122fb574-7efa-476a-95b6-bee81bce2cce/v2.0"),
++            None
++        );
++        // 다른 IdP — 허용목록을 켜 뒀더라도 crate 의 issuer 단언을 끄면 안 된다.
++        assert_eq!(multi_tenant_issuer_template("https://accounts.google.com"), None);
++        assert_eq!(multi_tenant_issuer_template("https://keycloak.example.com/realms/axe"), None);
++    }
++}
 diff --git a/src/sso_client.rs b/src/sso_client.rs
-index 5e8eb2b1..9f81463f 100644
+index 5e8eb2b1..5cada583 100644
 --- a/src/sso_client.rs
 +++ b/src/sso_client.rs
 @@ -8,9 +8,9 @@ use openidconnect::{
@@ -80,18 +169,32 @@ index 5e8eb2b1..9f81463f 100644
      },
      http, url,
  };
-@@ -148,6 +148,62 @@ impl<'c> AsyncHttpClient<'c> for OidcHttpClient {
+@@ -148,6 +148,80 @@ impl<'c> AsyncHttpClient<'c> for OidcHttpClient {
      }
  }
  
-+/// Fetch `<issuer>/.well-known/openid-configuration` **and the JWKS it advertises**, without
-+/// the crate's `metadata.issuer == issuer_url` assertion.
++/// `<issuer>/.well-known/openid-configuration`, built by **appending** the suffix.
 +///
-+/// Only reachable when `SSO_ALLOWED_TENANT_IDS` is set (see the call site). Entra's
-+/// `/organizations` and `/common` documents name their issuer with a `{tenantid}`
-+/// placeholder, so the assertion is structurally unsatisfiable there — skipping it is
-+/// the only way to use those endpoints at all. Token issuers are still constrained,
-+/// just later and more precisely, by `sso::issuer_is_accepted`.
++/// Deliberately not `Url::join`: RFC 3986 relative resolution treats the last segment of a
++/// base without a trailing slash as a file and replaces it, which would turn the authority
++/// `https://login.microsoftonline.com/organizations/v2.0` into a **v1** metadata URL. (The
++/// crate's own `IssuerUrl::join` happens to concatenate rather than resolve, but nothing in
++/// its name says so — this spells it out, and the tests below pin it.)
++fn discovery_url(issuer: &str) -> String {
++    format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/'))
++}
++
++/// Fetch `<issuer>/.well-known/openid-configuration` **and the JWKS it advertises**, binding
++/// the document to `expected_issuer` instead of to the requested URL.
++///
++/// Only reachable for an Entra `/organizations` or `/common` authority with a tenant
++/// allow-list set (see the call site). Those documents name their issuer with the literal
++/// `{tenantid}` placeholder, so the crate's `metadata.issuer == issuer_url` assertion is
++/// structurally unsatisfiable — but "unsatisfiable" is not "droppable": we still demand an
++/// exact string match, against the template that the same authority parsing derives. Without
++/// it the bypass would accept any document served at that URL, and since the id_token
++/// signatures are verified with keys from *this* document, the later `issuer_is_accepted`
++/// check on token claims would not be an equivalent binding.
 +///
 +/// Discovery is **two** fetches, not one. `ProviderMetadata.jwks` carries `#[serde(skip)]`,
 +/// so deserializing the document can never populate the signing keys — `discover_async`
@@ -100,16 +203,14 @@ index 5e8eb2b1..9f81463f 100644
 +/// exactly the 2026-08-11 production SSO outage.
 +async fn fetch_provider_metadata_unchecked(
 +    issuer_url: &openidconnect::IssuerUrl,
++    expected_issuer: &str,
 +    http_client: &OidcHttpClient,
 +) -> Result<CoreProviderMetadata, String> {
-+    // Same URL the crate builds (`IssuerUrl::join`), and — importantly — the same transport
-+    // as every other OIDC call. A bare `reqwest::get` would spin up the default client and
-+    // silently opt out of our timeouts, proxy and TLS policy for this one request.
-+    let url = issuer_url
-+        .join(".well-known/openid-configuration")
-+        .map_err(|e| format!("build discovery url for {}: {e}", issuer_url.as_str()))?;
++    // The same transport as every other OIDC call. A bare `reqwest::get` would spin up the
++    // default client and silently opt out of our timeouts, proxy and TLS policy here alone.
++    let url = discovery_url(issuer_url.as_str());
 +    let request = http::Request::builder()
-+        .uri(url.to_string())
++        .uri(&url)
 +        .method(http::Method::GET)
 +        .header(http::header::ACCEPT, http::HeaderValue::from_static("application/json"))
 +        .body(Vec::new())
@@ -123,6 +224,12 @@ index 5e8eb2b1..9f81463f 100644
 +    }
 +    let metadata =
 +        serde_json::from_slice::<CoreProviderMetadata>(resp.body()).map_err(|e| format!("parse {url}: {e}"))?;
++
++    // This replaces the assertion we skipped. `IssuerUrl` keeps the string it was given, so
++    // the literal `{tenantid}` survives here un-encoded and an exact comparison is meaningful.
++    if metadata.issuer().as_str() != expected_issuer {
++        return Err(format!("{url}: issuer is {}, expected {expected_issuer}", metadata.issuer().as_str()));
++    }
 +
 +    // Second fetch — the same call `discover_async` makes once it has the document. Reuse the
 +    // crate's own fetcher so the keys are parsed exactly as upstream parses them.
@@ -143,7 +250,7 @@ index 5e8eb2b1..9f81463f 100644
  impl Client {
      // Call the OpenId discovery endpoint to retrieve configuration
      async fn get_client() -> ApiResult<Self> {
-@@ -161,9 +217,27 @@ impl Client {
+@@ -161,9 +235,41 @@ impl Client {
              Ok(client) => client,
          };
  
@@ -156,24 +263,74 @@ index 5e8eb2b1..9f81463f 100644
 +        // hold and discovery 400s before any user is even redirected — which is exactly
 +        // what happened on 2026-08-10 when only the token-side checks had been patched.
 +        //
-+        // With a tenant allow-list configured we run discovery ourselves — document fetch,
-+        // deserialize (the crate only compares inside `discover_async`, not in `Deserialize`),
-+        // then the JWKS fetch that `discover_async` would have done. This is NOT a weakening:
-+        // the templated issuer is unusable for verification anyway, and `issuer_is_accepted`
-+        // re-checks the concrete `iss` of every token against the allow-list afterwards.
-+        let provider_metadata = if crate::sso::allowed_tenant_ids().is_empty() {
-+            match CoreProviderMetadata::discover_async(issuer_url, &http_client).await {
++        // Two conditions gate the bypass, and both must hold:
++        //   1. the operator named tenants (`SSO_ALLOWED_TENANT_IDS` non-empty), and
++        //   2. the authority really is one of Entra's multi-tenant endpoints, i.e. it has a
++        //      `{tenantid}` template to bind the document to.
++        // An allow-list alone must not disable the crate's issuer binding for some unrelated
++        // authority (Google, Keycloak, a single-tenant Entra tenant) — those keep
++        // `discover_async` untouched.
++        let issuer_template = if crate::sso::allowed_tenant_ids().is_empty() {
++            None
++        } else {
++            crate::sso::multi_tenant_issuer_template(&CONFIG.sso_authority())
++        };
++
++        let provider_metadata = match issuer_template {
++            None => match CoreProviderMetadata::discover_async(issuer_url, &http_client).await {
 +                Err(err) => err!(format!("Failed to discover OpenID provider: {err}")),
 +                Ok(metadata) => metadata,
-+            }
-+        } else {
-+            match fetch_provider_metadata_unchecked(&issuer_url, &http_client).await {
-+                Err(err) => err!(format!("Failed to fetch OpenID provider metadata: {err}")),
-+                Ok(metadata) => metadata,
++            },
++            // We run discovery ourselves — document fetch, deserialize (the crate only compares
++            // inside `discover_async`, not in `Deserialize`), issuer bound to the template, then
++            // the JWKS fetch `discover_async` would have done. Not a weakening: the URL-equality
++            // assert is swapped for template equality, and `issuer_is_accepted` still re-checks
++            // the concrete `iss` of every token against the allow-list afterwards.
++            Some(expected_issuer) => {
++                match fetch_provider_metadata_unchecked(&issuer_url, &expected_issuer, &http_client).await {
++                    Err(err) => err!(format!("Failed to fetch OpenID provider metadata: {err}")),
++                    Ok(metadata) => metadata,
++                }
 +            }
          };
  
          let auth_methods: Option<HashSet<CoreClientAuthMethod>> = provider_metadata
+@@ -407,3 +513,35 @@ impl<'a, AD: AuthDisplay, P: AuthPrompt, RT: ResponseType> AuthorizationRequestE
+         self
+     }
+ }
++
++#[cfg(test)]
++mod axe_discovery_tests {
++    // 디스커버리 URL 은 `{authority}/.well-known/openid-configuration` 이어야 한다.
++    // `Url::join` 류의 상대참조 해석은 trailing slash 없는 base 의 마지막 세그먼트를
++    // **교체**하므로 `/organizations/v2.0` 이 `/organizations` 가 되어 Entra **v1**
++    // 메타데이터를 받는다 — 로그인은 되는데 issuer 가 다른, 진단이 어려운 회귀다.
++    use super::*;
++
++    #[test]
++    fn multi_tenant_authorities_keep_their_v2_segment() {
++        assert_eq!(
++            discovery_url("https://login.microsoftonline.com/organizations/v2.0"),
++            "https://login.microsoftonline.com/organizations/v2.0/.well-known/openid-configuration"
++        );
++        assert_eq!(
++            discovery_url("https://login.microsoftonline.com/common/v2.0"),
++            "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration"
++        );
++    }
++
++    #[test]
++    fn single_tenant_authority_and_trailing_slash_agree() {
++        const TENANT: &str = "https://login.microsoftonline.com/122fb574-7efa-476a-95b6-bee81bce2cce/v2.0";
++        assert_eq!(
++            discovery_url(TENANT),
++            "https://login.microsoftonline.com/122fb574-7efa-476a-95b6-bee81bce2cce/v2.0/.well-known/openid-configuration"
++        );
++        // 설정에 슬래시가 붙어 와도 `//` 가 생기지 않는다.
++        assert_eq!(discovery_url(&format!("{TENANT}/")), discovery_url(TENANT));
++    }
++}
 -- 
 2.50.1 (Apple Git-155)
 
