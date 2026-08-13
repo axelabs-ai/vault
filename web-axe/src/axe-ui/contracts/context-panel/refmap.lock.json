@@ -1,0 +1,75 @@
+{
+  "schema": "@axe/ui/context-panel-refmap@1",
+  "note": "`axe ref` 디스패치 표의 **킷측 정본**. 실행측 정본은 agent CLI 의 `REF_DISPATCH` 이며, 이 파일은 그것과 바이트 대조하기 위한 사본이다 — 킷은 이 표를 실행하지 않는다.",
+  "invariants": [
+    "append-only: 한 번 공개된 (kind → tool, arg) 는 영구 고정. 매핑을 바꿔야 하면 값을 고치지 말고 새 kind 리터럴을 추가한다.",
+    "읽기 전용 도구만 등재한다. 쓰기 도구 등재 = 계약 위반이며, 소유 서비스의 쓰기 분류기 테스트가 그 ship 을 막는다.",
+    "미등재 kind = 존재하지 않음(fail-closed). '일단 열어두기' 금지.",
+    "도구명·인자명은 토큰에 절대 실리지 않는다. 토큰이 tool 을 나르면 무서명 토큰의 tool 을 바꾼 것을 붙여넣는 순간 임의 도구 실행 프리미티브가 된다 — 매핑이 CLI 안에 갇혀 있다는 사실이 read-only 의 기계적 근거다.",
+    "descriptor version 필드를 두지 않는다. 의미가 바뀌지 않으므로 버전화할 대상이 없다."
+  ],
+  "limits": {
+    "note": "이 표가 막지 못하는 것 — 상류 도구가 인자명을 바꾸거나 도구를 삭제하는 것. 그 경우 호출은 MCP 서버 오류로 시끄럽게 실패하며(오조회로 조용히 성공하지 않는다), 복구는 새 kind 추가다.",
+    "ponytail": "손 유지 불변 매핑, 라이브 tools/list 주기 대조에서 드리프트가 실제 관측되면 서비스별 서명 descriptor 도입"
+  },
+  "dispatch": {
+    "blueprint.issue@1.0": {
+      "tool": "get_issue",
+      "arg": "idOrIdentifier"
+    },
+    "cortex.person@1.0": {
+      "tool": "get_person",
+      "arg": "person_id"
+    },
+    "gate.workflow@1.0": {
+      "tool": "get_workflow",
+      "arg": "workflow_id"
+    },
+    "index.deal@1.0": {
+      "tool": "get_deal",
+      "arg": "deal_code"
+    }
+  },
+  "descriptors": {
+    "blueprint.issue@1.0": {
+      "service": "blueprint",
+      "effect": "read_only",
+      "projection": "full",
+      "contains_untrusted_text": true,
+      "writeClassifier": "blueprint `tool_is_read_only` (mcp/src/blueprint_mcp/mcp/tool_access.py) — 읽기 도구만 명시 열거하고 그 밖은 전부 쓰기라 default-allow 가 없다(index 의 `_ => false` 와 반대 방향). 게이트 = mcp/tests/test_tool_access.py, `pnpm build` 체인",
+      "evidence": "mcp/src/blueprint_mcp/mcp/tools/issues.py `get_issue(idOrIdentifier)` — SELECT 전용. 인자명 일치는 blueprint 빌드에서 파스 트리로 대조된다",
+      "untrustedFields": "제목·본문·상태/우선순위·담당자 id·댓글 본문 전량"
+    },
+    "cortex.person@1.0": {
+      "service": "cortex",
+      "effect": "read_only",
+      "projection": "full",
+      "contains_untrusted_text": true,
+      "writeClassifier": "cortex `tool_is_read_only` (src/mcp.rs) — 읽기 도구만 명시 열거, 그 밖은 전부 쓰기(blueprint 와 같은 방향)라 default-allow 가 없다. 게이트 = mcp.rs mod tests + Dockerfile `cargo test --release --bin cortex`",
+      "evidence": "cortex src/mcp.rs `get_person(person_id|id)` — SELECT 전용 (artifact+citation+event 조회, 부수효과 0)",
+      "untrustedFields": "표시명·소속·직급·메모·attribute 값·interaction 본문 등 payload 전량 + citations + 최근 events"
+    },
+    "gate.workflow@1.0": {
+      "service": "gate",
+      "effect": "read_only",
+      "projection": "full",
+      "contains_untrusted_text": true,
+      "writeClassifier": "gate `api_key_tool_access` (mcp.rs:400) — 미지 도구는 DomainError::NotFound (:437) 라 default-allow 가 없다",
+      "evidence": "gate/src/mcp.rs:255 schema · :409 ApiKeyScope::Read",
+      "untrustedFields": "제목·상태·유형/법인·금액·결재자 이메일·봉인 서명자 CN·원본 첨부 파일명"
+    },
+    "index.deal@1.0": {
+      "service": "index",
+      "effect": "read_only",
+      "projection": "full",
+      "contains_untrusted_text": true,
+      "writeClassifier": "index `tool_requires_write` (mcp.rs:119-144) — 단 `_ => false` 폴백이 default-allow 다(명명된 한계). 신규 쓰기 도구가 조용히 read 로 분류될 수 있다.",
+      "evidence": "index/src/mcp.rs citation_arg_contract",
+      "untrustedFields": "문자 그대로 full snapshot (index/src/mcp.rs:227)"
+    }
+  },
+  "effect": {
+    "meaning": "`effect: \"read_only\"` 는 **자격증명 주장이 아니라 매핑 주장**이다 — AXE 가 이 kind 에 대해 디스패치 표에 등록한 도구가, 그 서비스 자신의 쓰기 분류기에서 write 로 분류되지 않는다는 것. 그 명령을 실행하는 자격증명이 무엇까지 할 수 있는지는 실행하는 기기가 정하며 AXE 가 제한하지 않는다.",
+    "absentClassifier": "쓰기 분류기가 없는 서비스는 등재하지 않는다 → 그 서비스의 모든 kind 는 prompt: unavailable(no-refetch). 오늘 그런 서비스는 없다 — blueprint 는 0.33.2, cortex 는 0.36.0 에서 분류기를 만들어 등재됐다 — 활성화 조건은 계약의 예외가 아니라 이 조건 자체였다."
+  }
+}

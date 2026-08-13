@@ -9,6 +9,9 @@
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
+    // 타입 스트리핑만으로 지워지는 문법만 허용한다 — tests/*.test.mjs 가 src/**/*.ts 를
+    // 빌드 없이 직접 import 하기 때문. enum·namespace·파라미터 프로퍼티가 컴파일에서 걸린다.
+    "erasableSyntaxOnly": true,
     "moduleDetection": "force",
     "noEmit": true,
     "jsx": "react-jsx",

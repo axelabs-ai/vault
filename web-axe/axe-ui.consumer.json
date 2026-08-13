@@ -1,0 +1,7 @@
+{
+  "$schema": "https://axe.axelabs.ai/schemas/axe-ui-consumer-config.json",
+  "out": "src/axe-ui",
+  "assetBase": "fonts",
+  "compatibility": "modern",
+  "profile": "core-data"
+}

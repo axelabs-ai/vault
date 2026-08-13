@@ -1,0 +1,385 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://design.axelabs.ai/contracts/context-panel/contract.v1.json",
+  "schema": "@axe/ui/context-panel@1",
+  "title": "ContextPanel@1",
+  "description": "`.axe-workspace-context` 3슬롯 스택의 데이터 계약. 소유 = @axe/ui. 소비자 = gate·cortex·blueprint (layer = 비소비자, index = 우측 패널 opt-out). 이 파일에는 킷 버전이 들어 있지 않다 — 계약은 `@axe/ui/context-panel@1` 로 버전되며, 킷 릴리스마다 바이트가 흔들리면 계약이 아니라 로그가 된다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["help", "dock", "state"],
+  "properties": {
+    "subject": { "$ref": "#/$defs/Subject" },
+    "help": { "$ref": "#/$defs/Help" },
+    "prompt": { "$ref": "#/$defs/PromptRecipe" },
+    "dock": { "$ref": "#/$defs/Dock" },
+    "state": { "$ref": "#/$defs/State" }
+  },
+  "allOf": [
+    {
+      "title": "X3 — refetch 존재 ⟺ 상태가 ready",
+      "if": {
+        "properties": { "state": { "properties": { "prompt": { "properties": { "status": { "const": "ready" } } } } } },
+        "required": ["state"]
+      },
+      "then": {
+        "required": ["prompt"],
+        "properties": { "prompt": { "required": ["refetch"] } }
+      }
+    },
+    {
+      "title": "X3 — no-subject 는 카드를 렌더하되 재조회 행이 없다",
+      "if": {
+        "properties": { "state": { "properties": { "prompt": { "properties": { "status": { "const": "no-subject" } } } } } },
+        "required": ["state"]
+      },
+      "then": {
+        "required": ["prompt"],
+        "properties": { "prompt": { "not": { "required": ["refetch"] } } }
+      }
+    },
+    {
+      "title": "I3 — unavailable 은 카드 자체가 없다. 빈 카드·placeholder 금지",
+      "if": {
+        "properties": { "state": { "properties": { "prompt": { "properties": { "status": { "const": "unavailable" } } } } } },
+        "required": ["state"]
+      },
+      "then": { "not": { "required": ["prompt"] } }
+    }
+  ],
+  "$defs": {
+    "Subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "kind", "id", "label", "page_key"],
+      "properties": {
+        "service": { "type": "string", "pattern": "^[a-z][a-z-]*$" },
+        "kind": { "type": "string", "minLength": 1 },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "서비스별 **실제 형태 그대로**. 정규화·uuid 강제 금지 — gate=uuid, index=deal_code, cortex=uuid, blueprint=BP-42. 문법은 id-validator.vectors.json 이 정의한다."
+        },
+        "label": {
+          "type": "string",
+          "description": "**화면 표시 전용.** 복사 텍스트에 들어가지 않는다. 근거는 '더 안전해서' 가 아니라 정보가 0이기 때문이다 — 재조회가 실행되면 응답 첫 필드가 제목이다. label 은 외부 에이전트의 지식을 늘리지 않으면서 주입 벡터·bidi 표시 왜곡면·클립보드 이력의 상관관계만 추가한다."
+        },
+        "page_key": { "type": "string", "minLength": 1 }
+      }
+    },
+    "Help": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["headline", "summary", "rules"],
+      "properties": {
+        "headline": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "rules": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "docs_link": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9/_-]*$",
+          "description": "**페이지 경로만. 앵커 금지.** 딥링크는 문서 구조 변경에 조용히 썩는다."
+        }
+      }
+    },
+    "PromptRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["notice", "projection", "contains_untrusted_text"],
+      "description": "`lines: string[]` 은 **금지**다. 배열은 '배열임' 밖에 검증하지 못하고(문안·행 위치·이스케이프·notice 버전·trailing newline 전부 미검증) 조립기를 Rust·TS 여러 벌로 복제시킨다. 렌더는 킷이 소유한 규칙 + 골든 벡터가 고정한다. **`subject` 필드는 존재하지 않는다** — 2행을 토큰 디코드 결과로 렌더하므로 '표시는 A, 토큰은 B' 라는 상태가 표현 불가능해진다(X1).",
+      "properties": {
+        "guide": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cmd", "effect"],
+          "properties": {
+            "cmd": { "type": "string", "pattern": "^axe [a-z][a-z-]* guide$" },
+            "effect": { "const": "read_only" }
+          },
+          "description": "read-only guide 가 있는 서비스에서만. 오늘 그런 guide 는 0개다 — blueprint 의 `axe blueprint guide` 는 todo add/assign/done 을 실제 실행하라는 **쓰기 지침**이라 여기 오지 못한다. 따라서 오늘 1행은 어느 서비스에서도 렌더되지 않는다."
+        },
+        "refetch": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ref"],
+          "properties": {
+            "ref": { "type": "string", "pattern": "^axeref1_[A-Za-z0-9_-]+$", "maxLength": 1024 }
+          }
+        },
+        "notice": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version"],
+          "properties": {
+            "version": { "type": "string", "pattern": "^ctxprompt-[0-9a-f]{12}$" }
+          }
+        },
+        "projection": {
+          "enum": ["narrow", "full"],
+          "description": "**스키마는 이 값이 참인지 검증하지 않는다.** 오늘 등재 4개 모두 full — 읽기 폭 축소는 자격증명도 스키마도 아니라 제품 결정(narrow read tool 신설)이다."
+        },
+        "contains_untrusted_text": {
+          "type": "boolean",
+          "description": "재조회가 자유 문자열을 반환하는가. 오늘 등재 4개 모두 true."
+        }
+      }
+    },
+    "Dock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "active_breakpoint_px"],
+      "properties": {
+        "mode": {
+          "enum": ["served", "absent"],
+          "description": "`absent` 면 도크 노드도 **호스트도** 렌더하지 않는다(빈 호스트 = 죽은 마크업). 오늘 gate=served, cortex·blueprint=absent."
+        },
+        "active_breakpoint_px": {
+          "const": 1440,
+          "description": "도크가 `toc` 사본에 사는 최소 폭. 이 값이 SoT 이고 킷 CSS 미디어쿼리·소비자 mover 상수가 여기에 맞춘다. **수치 일치만 강제된다** — jsdom 은 미디어쿼리를 계산하지 않으므로 실제 적용 결과는 증명되지 않는다."
+        }
+      }
+    },
+    "State": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["help", "prompt", "chat"],
+      "description": "3축 독립. 한 축의 error 는 **그 축만** unavailable 로 만들고 다른 축을 가리지 않는다. 세 축 모두 렌더 힌트이며 실행 성공 예측이 아니다.",
+      "properties": {
+        "help": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": { "status": { "enum": ["ready", "unavailable"] } }
+        },
+        "prompt": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": {
+            "status": { "enum": ["ready", "no-subject", "unavailable"] },
+            "reason": {
+              "enum": ["invalid-id", "no-refetch", "policy-blocked", "error"],
+              "description": "`no-read-scope` 는 사유가 아니다 — 서버가 판정할 수 없는 상태이고, 붙여넣을 상대 머신의 CLI 자격 상태는 렌더하는 서버의 관측 밖이다."
+            }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "status": { "const": "unavailable" } }, "required": ["status"] },
+              "then": { "required": ["reason"] },
+              "else": { "not": { "required": ["reason"] } }
+            }
+          ]
+        },
+        "chat": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": {
+            "status": { "enum": ["off", "needs-org-approval", "needs-user-consent", "ready", "rate-limited", "busy", "error"] }
+          }
+        }
+      }
+    }
+  },
+
+  "x-readiness": {
+    "note": "readiness 판정에 **자격증명은 입력이 아니다.** 렌더하는 서버가 그 요청 안에서 관측 가능한 사실만으로 판정한다.",
+    "ready": [
+      "R1 subject 존재 (레코드 상세 표면)",
+      "R2 subject.id 가 id-validator.vectors.json 문법 통과",
+      "R3 벤더된 재조회 계약(refmap.lock.json)에 (service, kind) descriptor 존재",
+      "R4 조직 스위치 `external_prompt_enabled` = on"
+    ],
+    "noSubject": "R1 거짓 (목록·대시보드·랜딩). 오류가 아니라 1급 상태다.",
+    "unavailable": "R2·R3·R4 중 하나 이상 거짓.",
+    "cost": "R2·R3 는 순수 함수 + 빌드타임 상수다. readiness 평가에 네트워크 호출·DB 조회는 R4 하나뿐이다.",
+    "evaluatorSignature": "readiness evaluator 시그니처에 토큰·scope·auth 파라미터를 두지 않는다 — 컴파일러가 자격증명 입력 불가를 강제하는 것이 실질 방어선이고, 소스 문자열 단언은 alias/helper 로 우회 가능하다.",
+    "listCommandRemoved": "재조회를 목록 명령으로 여는 것은 계약에서 삭제됐다: (a) 잘못된 id 로 더 넓은 조회를 유도하는 강등 공격이 성립하고, (b) 목록 명령의 필터·정렬·기간·법인·페이지 축이 계약에 정의된 적이 없으며, (c) 삭제하면 카드가 상세 표면에만 존재하게 되어 데이터 최소화가 렌더 위치로 자동 성립한다."
+  },
+
+  "x-crossField": [
+    {
+      "id": "X1",
+      "rule": "UI 표시와 토큰이 갈라질 수 없다",
+      "enforcement": "structure",
+      "detail": "PromptRecipe 에 subject 가 없고 2행을 토큰 디코드 결과로 렌더하므로 불일치가 **표현 불가능**하다. 화면 표시용 이름은 최상위 `subject.label` 로만 남고 복사 타깃 밖이다. 렌더러는 레시피에 잉여 `subject` 키가 들어오면 하드 실패한다."
+    },
+    {
+      "id": "X2",
+      "rule": "guide.cmd 의 <svc> == 토큰이 가리키는 서비스",
+      "enforcement": "renderer-entry",
+      "detail": "gate 카드가 `axe blueprint guide` 를 표시하는 상태를 막는다. 추가로 guide.effect 가 read_only 가 아니면 1행을 렌더하지 않는다."
+    },
+    {
+      "id": "X3",
+      "rule": "refetch 존재 ⟺ 상태가 ready",
+      "enforcement": "schema+renderer-entry",
+      "detail": "위 allOf 가 문서 수준에서, 렌더러 진입 검사가 호출 수준에서 같은 등식을 건다."
+    },
+    {
+      "id": "X4",
+      "rule": "모든 객체에 additionalProperties:false",
+      "enforcement": "schema",
+      "detail": "미지 필드가 조용히 통과하지 않는다. 단 이것은 **문서 검증**이며, 프로덕션 렌더 경로가 실제로 validator 를 호출하는지는 각 소비자의 호출 그래프 단언이 진다."
+    }
+  ],
+
+  "x-prompt": {
+    "note": "복사 텍스트는 클립보드에 놓이는 순간 AXE 신뢰경계 **밖**이다. 그 밖에는 system 역할도, 요청별 nonce envelope 도, 서버측 재검증도 없다. 따라서 채팅 경로의 sanitize(정규화 후 계속 진행)를 이 경로에 옮기지 않는다 — 정규화된 공격 문자열은 여전히 공격 문자열이고, 복사 경로에는 그것을 데이터로 가둘 상위 역할이 없다. **sanitize 가 아니라 validate 한다.**",
+    "lines": [
+      { "n": 1, "when": "guide.effect == \"read_only\"", "template": "axe <svc> guide 실행하고, 출력된 지침대로 처리해줘.", "renderedToday": false },
+      { "n": 2, "when": "refetch", "template": "대상: <svc>/<kind-local> <id>", "source": "refetch.ref 디코드 결과. <svc> = k 의 첫 `.` 앞, <kind-local> = 그 뒤." },
+      { "n": 3, "when": "refetch", "template": "현재 상태: axe ref <REF>", "note": "**정확히 이 한 줄이다.** 다른 형태(here-doc·파이프·다중 명령)를 렌더하면 계약 위반이다." },
+      { "n": 4, "when": "always", "template": "작업:" },
+      { "n": 5, "when": "always", "template": "(discipline block — golden/copy-*.txt 가 바이트를 고정)" }
+    ],
+    "join": "행을 \"\\n\" 으로 잇고 끝에 \"\\n\" 하나를 붙인다.",
+    "removedClaims": [
+      "\"위 명령은 조회 전용이며\" — 오늘 어떤 서비스도 사람 OAuth 주체에 읽기를 강제하지 않는다. CLI 자신도 실행 전 자기 갱신 후 재진입하고 전역 git credential helper 를 설정하므로 프로세스 수준에서도 거짓이다.",
+      "401 안내 — 실행 시점 CLI 가 이미 정확한 문안을 소유한다. 복사 텍스트는 CLI 가 실행 시점에 아는 것을 다시 말하지 않는다(v1 의 'TTL 1시간' 거짓 문장이 정확히 이 위반이었다)."
+    ],
+    "knownIncoherence": "no-subject 상태에서 5행의 '위 한 줄' 이 가리킬 명령 행이 0개다(1행이 오늘 렌더되지 않으므로). 문장은 여전히 '다른 axe 명령을 만들어 실행하지 마라' 로 기능하지만, 지시 대상이 없는 문장인 것은 사실이다. 5행의 역할은 안내가 아니라 에이전트가 자격을 추측하거나 스스로 로그인 흐름을 띄우지 못하게 막는 것이다."
+  },
+
+  "x-notice": {
+    "note": "카드 안 고지문. **복사 타깃 바깥**이라 copy 골든이 덮지 못하므로 별도 notice 골든이 바이트를 고정한다.",
+    "version": "ctxprompt-fcb327db78cb",
+    "versionRule": "`ctxprompt-` + sha256(golden/notice-template.txt) 앞 12 hex. 문안이 바뀌면 버전이 바뀐다.",
+    "consentAxis": "전용 축이다. 채팅의 국외이전 동의(`ai_transfer_consent`)를 재사용하지 않는다 — 그 축의 버전은 채팅 문안 해시에서 유도되므로, 프롬프트 문안을 얹으면 문안 변경이 전원 채팅 재동의를 유발하고 반대로 채팅 문안 변경이 프롬프트 확인을 무효화한다. 그리고 이것은 국외이전 동의가 아니다 — 복사 시점에 AXE 가 국경 밖으로 보내는 것은 없고, 사용자가 통제되지 않는 목적지를 고르는 **공개(disclosure)에 대한 확인**이다.",
+    "render": "블록 1개 = 문단 1개. 블록 안의 개행은 조판 줄바꿈이라 렌더 시 흘려보낸다(골든의 바이트는 그대로 유지).",
+    "blocks": [
+      { "when": "always" },
+      { "when": "projection-full" },
+      { "when": "always" },
+      { "when": "always" },
+      { "when": "always" },
+      { "when": "always" },
+      { "when": "contains-untrusted-text" }
+    ]
+  },
+
+  "x-dom": {
+    "instance": {
+      "attribute": "data-axe-ctx",
+      "values": ["toc", "drawer"],
+      "host": "**셸이 소유하는 호스트 요소**에 붙는다. 패널 루트가 아니다 — cortex 는 패널 마크업을 사전 조립해 clone 하고 blueprint 는 같은 children 을 두 portal 에 싣기 때문에, 루트 부착은 두 소비자의 인터페이스를 render-prop 으로 바꾸는 대가를 요구하면서 얻는 것이 0이다. `closest('[data-axe-ctx]')` 는 호스트에 붙어도 동일하게 동작한다.",
+      "consequence": "패널 콘텐츠 마크업에는 인스턴스에 의존하는 바이트가 **존재하지 않는다** → 슬롯 ①② 는 두 사본이 바이트 동일하고, 비교에 정규화 축이 0이다."
+    },
+    "slots": {
+      "order": ["axe-workspace-context__help", "axe-workspace-context__prompt", "axe-workspace-context__dock"],
+      "invariants": [
+        "I1 슬롯 ① 은 인증된 워크스페이스 표면의 어떤 상태에서도 렌더된다(키 0·동의 0·네트워크 0).",
+        "I2 슬롯 순서 고정. ②③ 이 ① 을 대체·선행하지 않는다.",
+        "I3 슬롯이 비면 사라진다. 빈 카드·placeholder 금지.",
+        "I4 채팅 스트리밍 중 슬롯 ①② 의 DOM 은 재렌더되지 않는다.",
+        "I5 복사 대상 텍스트는 고정 리터럴 + 검증 통과 id + 계약 명령 템플릿으로만 구성된다. **`id` 는 서비스 문자열이므로 '서비스 자유 문자열 0자' 라고 쓰지 않는다.**"
+      ],
+      "duplication": {
+        "help": "2벌 (무상태 — (page_key) 순수 함수)",
+        "prompt": "2벌 (무상태 — (subject, page_key) 순수 함수). 복사 동작만 로컬화된다.",
+        "dock": "문서당 1개 (유상태 — 대화·작성중 입력·busy·확인)"
+      }
+    },
+    "ids": {
+      "rule": "슬롯 ①② 서브트리에 `id` 속성 0개. 라벨링은 aria-label. `aria-labelledby`·`aria-controls`·`aria-describedby` 도 슬롯 ①② 에서 금지 — 참조 대상이 필요한 요소는 슬롯③이거나 셸 소유다.",
+      "dockPrefix": "axe-ctx-dock-",
+      "note": "슬롯③은 문서당 1개이므로 id 를 허용한다. 인스턴스 축은 없다. 셸 소유 호스트의 id 는 계약 밖이다."
+    },
+    "dock": {
+      "rootAttribute": "data-axe-dock-root",
+      "hostAttribute": "data-axe-dock-host",
+      "naming": "`data-axe-dock` 을 쓰지 않는다 — `data-axe-dock-host` 의 **부분문자열**이라 문자열 카운트가 조용히 과다 계수한다(gate·cortex 의 계약 테스트는 문자열 단언뿐이다).",
+      "counts": { "served": { "root": 1, "host": 2 }, "absent": { "root": 0, "host": 0 } },
+      "serverRender": "서버는 도크를 `toc` 사본에 정확히 1회 렌더한다. `drawer` 사본은 빈 호스트만 낸다. 클라이언트 생성이 아닌 이유: 서버렌더 소비자에 DOM 하네스가 없어 클라이언트 생성 도크는 문자열 단언으로 셀 수 없고 노드 수 게이트가 공허해진다.",
+      "mover": {
+        "owner": "소비자(gate). 킷은 이 표면의 JS 를 배포하지 않는다.",
+        "rules": [
+          "최초 1회 `[data-axe-dock-root]` 를 **보유 노드**로 채택한다.",
+          "mount(): 보유 노드가 아닌 모든 `[data-axe-dock-root]` 를 제거한 뒤 활성 호스트에 보유 노드를 appendChild 한다. **복제·재생성 금지** (cloneNode·innerHTML 재작성 금지).",
+          "활성 인스턴스 = matchMedia(`(min-width: 1440px)`).matches ? \"toc\" : \"drawer\".",
+          "mount() 호출 시점 = 최초 로드 · matchMedia change · 소프트 내비게이션 교체 직후.",
+          "이동 전 document.activeElement 가 보유 노드 안이면 그 요소와 selectionStart/End 를 기록하고 이동 후 복원한다. **노드 이동은 DOM 명세상 포커스를 body 로 보낸다** — 기록·복원이 없으면 작성 중 입력이 죽는다."
+        ],
+        "overlayBan": "도크는 in-flow 다. 오버레이하는 순간 그것은 도크가 아니라 탭이고 슬롯 순서 불변식이 깨진다."
+      }
+    },
+    "copy": {
+      "trigger": "[data-axe-copy]",
+      "source": "[data-axe-copy-source=\"<local>\"]",
+      "status": "[data-axe-copy-status]",
+      "target": "[data-axe-copy-target]",
+      "note": "**킷은 Copy JS 를 배포하지 않는다** — CSS 프레임 + 셀렉터 + 동작 규약만 소유한다. `<local>` 은 문서 id 가 아니라 카드 내 로컬 이름이다(슬롯 ①② 의 id 금지와 정합).",
+      "conventions": [
+        { "id": "K1", "rule": "**루트 상대 해석** — trigger.closest('[data-axe-ctx]') 안에서 원본·상태 노드를 찾는다. 패널 밖의 기존 복사 버튼은 문서 폴백으로 무변경 동작한다. 전역 getElementById 로 짝을 찾으면 문서 순서상 첫 사본이 잡히고, 넓은 화면에서 그것은 **보이지 않는 사본**이다." },
+        { "id": "K2", "rule": "**성공·실패 둘 다 announce** — 상태 노드는 role=\"status\". 성공 `복사했습니다.` / 실패 `복사하지 못했습니다. 아래 상자에서 직접 선택해 복사해 주세요.` aria-describedby 대상의 textContent 변경은 SR 이 읽지 않으므로 live region 이 필요하다." },
+        { "id": "K3", "rule": "**실패는 수동 경로를 남긴다** — 복사 원본은 보이는 선택 가능 노드. `display:none` 버퍼 금지." },
+        { "id": "K4", "rule": "**포커스 불변** — focus() 호출 금지, disabled 부여 금지(→ aria-disabled)." },
+        { "id": "K5", "rule": "**트리거 accessible name 불변** — 시각 텍스트가 바뀌어도 accessible name 은 고정." },
+        { "id": "K6", "rule": "다중 인스턴스 동일 동작 = K1–K5 의 따름정리." }
+      ],
+      "enforcement": {
+        "machine": "**gate 단독** (신설 jsdom 하네스). 두 사본이 있는 문서에서 복사 트리거가 자기 사본의 원본을 읽고 자기 사본의 status 에 쓰며, 실패 경로가 announce 되고 원본이 보이는지를 검사한다.",
+        "prose": "React 소비자(@axe/ui `CodeBlock`)는 0.33.0 의 기계 강제 대상이 **아니다** — blueprint 의 테스트 러너에 jsdom 이 없고, 컨텍스트 패널의 복사 타깃은 gate 가 렌더하므로 CodeBlock 은 그 표면이 아니다. 'K1–K6 을 3사가 똑같이 만족한다' 는 문장은 계약에 없다. CodeBlock 의 실제 결함(실패를 catch 로 삼키고 live region 이 없어 SR 사용자가 성공도 실패도 듣지 못함)은 별건이다.",
+        "notMachine": "여기 적힌 K1–K6 은 **산문 규약**이다. 킷 자신은 이것을 강제하지 못한다 — 킷이 JS 를 배포하지 않기 때문이다."
+      }
+    },
+    "subjectAttributes": ["data-axe-subject-service", "data-axe-subject-kind", "data-axe-subject-id", "data-axe-page"]
+  },
+
+  "x-goldens": {
+    "note": "골든이 덮는 입력에서만 다언어 구현의 동등이 증명된다. 골든 밖 입력에 대해서는 아무것도 증명하지 않는다.",
+    "issuer": "axe.axelabs.ai",
+    "copy": [
+      { "file": "golden/copy-ready-toc.txt", "state": "ready", "instance": "toc", "empty": false },
+      { "file": "golden/copy-ready-drawer.txt", "state": "ready", "instance": "drawer", "empty": false },
+      { "file": "golden/copy-no-subject-toc.txt", "state": "no-subject", "instance": "toc", "empty": false },
+      { "file": "golden/copy-no-subject-drawer.txt", "state": "no-subject", "instance": "drawer", "empty": false },
+      { "file": "golden/copy-unavailable-toc.txt", "state": "unavailable", "instance": "toc", "empty": true },
+      { "file": "golden/copy-unavailable-drawer.txt", "state": "unavailable", "instance": "drawer", "empty": true }
+    ],
+    "emptyIsIntentional": "unavailable 은 카드가 렌더되지 않는 상태이므로 복사 텍스트가 존재하지 않는다. 0바이트 파일이 그 사실의 바이트 정확한 표현이며, 여기 `empty: true` 로 **선언**해 두어 '복사가 실패한 빈 파일' 과 구분한다.",
+    "instancePairsAreIdentical": "toc/drawer 쌍은 바이트 동일해야 한다 — 그것이 슬롯 ①② 이중화 규율의 골든 인코딩이다.",
+    "notice": [
+      { "file": "golden/notice-template.txt", "role": "notice.version 의 해시 원문. `<svc>`·`<kind>` 미치환." },
+      { "file": "golden/notice-ready-full-untrusted.txt", "role": "오늘 등재된 네 descriptor 의 형태 (projection=full, contains_untrusted_text=true)." },
+      { "file": "golden/notice-narrow-trusted.txt", "role": "**합성 입력.** 두 조건부 블록이 실제로 빠지는지 고정하기 위한 것이며, 오늘 등재된 descriptor 중 narrow/trusted 는 없다." }
+    ],
+    "forbiddenSubstrings": {
+      "note": "copy 골든에 아래 문자열이 나타나면 삭제된 거짓 문안이 되살아난 것이다.",
+      "values": ["조회 전용", "401", "TTL", "axe login"]
+    },
+    "notCovered": [
+      "chat 7상태와 request-time 전환 — 골든은 prompt 3상태 × 인스턴스 2종만 덮는다.",
+      "readiness 판정 자체의 오류.",
+      "hydration 이후 클라이언트가 한쪽 사본만 변형하는 경우."
+    ]
+  },
+
+  "x-delivery": {
+    "npm": "@axe/ui `dist/contracts/context-panel/**` (exports: `./contracts/context-panel/*`)",
+    "consumerKit": "`axe-ui-export` 가 `contracts/context-panel/` 를 킷에 싣는다. 복사는 **lock manifest 의 파일 목록·contentSha256 을 계산하기 이전**에 일어나야 한다 — 이후에 복사하면 파일은 배달되는데 freshness 게이트가 그것을 지키지 않는 상태가 조용히 생긴다.",
+    "freshness": "`axe ship <svc>` 의 @axe/ui consumer kit 게이트가 **개별 소비자의 byte drift** 를 막는다. **fleet 동시 버전은 강제하지 않는다** — 실측상 서로 다른 킷 버전이 공존한 이력이 있고, 계약 v1 단일 버전 구간에는 skew 가 성립하지 않는다.",
+    "ponytail": "개별 freshness 만 강제, contract v2 를 실제로 내보내는 시점에 fleet 동시버전 게이트 신설"
+  },
+
+  "x-notOwned": [
+    "도움말 문안 전체 · 화면 enum 과 망라성",
+    "subject 추출",
+    "`axe ref` 디스패치 표의 **실행측 정본** (= agent CLI. 킷은 대조용 사본만 소유)",
+    "provider 호출·모델·토큰 상한",
+    "국외이전 고지 문안과 동의 원장 · 감사 원장 · admission 카운터",
+    "복사 JS 구현 · 도크 mover JS (소비자 소유)"
+  ],
+
+  "x-notPromised": [
+    "**프롬프트 주입을 막지 못한다.** label 을 제거해도 재조회된 제목·댓글·파일명·인물 메모에 심어진 지시문은 외부 모델의 입력이 된다. 완화 없음.",
+    "**외부 모델이 무엇을 하는지 통제하지 못한다.** 복사된 것은 allowlist executor 가 아니라 자연어다.",
+    "**5행이 지켜진다고 보장하지 못한다.** 5행은 텍스트이며 경계가 아니다. 그리고 이 릴리스에는 자격증명 경계가 없다.",
+    "**실행 주체가 복사 주체와 같다고 보장하지 못한다.** `iss` 는 호스트만 일치시킨다(actor/tenant/audience 바인딩 없음).",
+    "**클립보드 이후를 통제하지 못한다.** 이력·기기 간 동기화·외부 AI 대화 보존·셸 히스토리.",
+    "**읽기 남용을 막지 못한다.** 외부 에이전트가 읽기 권한으로 목록 도구를 반복 호출하는 것은 계약 밖이다.",
+    "**복사한 사람이 그 명령을 실행할 수 있는지 알지 못한다.** `ready` 로 렌더된 카드가 인증 오류로 끝나는 것은 계약 위반이 아니라 정상 동작이다.",
+    "**토큰 위조를 막지 못한다.** 무서명·결정론적이라 `i` 를 A→B 로 바꿀 수 있고 '원장은 A, 실제 조회는 B' 가 성립한다. 서명(HMAC)도 이를 바꾸지 못한다 — 같은 사용자가 손 타이핑으로 동일한 결과를 낼 수 있어 실효가 0이다. 제3자 시나리오의 방어는 서명이 아니라 **맵 폐쇄성**(읽기 도구만 등재)이 진다.",
+    "**릴리스 원장이 복사 횟수를 세지 않는다.** 서버가 관측 가능한 것은 '내주었다' 뿐이며, 클립보드 도달·복사 횟수·우회 불가능성은 증명 불가다.",
+    "**킷은 K1–K6 을 기계로 강제하지 못한다.** 킷이 JS 를 배포하지 않으므로 강제는 소비자(gate)의 하네스에만 존재한다."
+  ]
+}

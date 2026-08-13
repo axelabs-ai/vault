@@ -1,0 +1,226 @@
+{
+  "schema": "@axe/ui/context-panel-ref-token@1",
+  "note": "`(iss,k,i)` → 정확한 토큰 문자열. 생산자는 서비스 서버(Rust/TS), 소비자는 agent CLI(Python) 라 이 표가 세 언어의 바이트 동등을 잇는다. 드리프트가 생기면 비정규 토큰이 되어 소비자가 `not-canonical` 로 거부한다 — 잘못된 디스패치로 조용히 성공하는 경로가 없다.",
+  "canonicalForm": {
+    "prefix": "axeref1_",
+    "keyOrder": [
+      "iss",
+      "k",
+      "i"
+    ],
+    "separators": {
+      "pair": ",",
+      "keyValue": ":"
+    },
+    "whitespace": 0,
+    "ensureAscii": false,
+    "encoding": "base64url, 패딩 없음"
+  },
+  "limits": {
+    "maxTokenChars": 1024,
+    "maxPayloadBytes": 512,
+    "maxIdBytes": 128
+  },
+  "validation": "재직렬화 결과가 원문 토큰과 바이트 동일할 것 — 이 등식 하나가 중복 키·미지 필드·키 순서·공백·유니코드 이스케이프·패딩·표준 base64 알파벳을 전부 거부한다.",
+  "errorOrder": [
+    "unknown-version",
+    "token-too-long",
+    "charset",
+    "base64",
+    "payload-too-long",
+    "payload-not-utf8-json",
+    "not-object",
+    "field-type",
+    "not-canonical",
+    "issuer-mismatch",
+    "unknown-kind",
+    "id-rejected"
+  ],
+  "issuer": "axe.axelabs.ai",
+  "kinds": [
+    "blueprint.issue@1.0",
+    "cortex.person@1.0",
+    "gate.workflow@1.0",
+    "index.deal@1.0"
+  ],
+  "encode": [
+    {
+      "payload": {
+        "iss": "axe.axelabs.ai",
+        "k": "blueprint.issue@1.0",
+        "i": "BP-42"
+      },
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJibHVlcHJpbnQuaXNzdWVAMS4wIiwiaSI6IkJQLTQyIn0"
+    },
+    {
+      "payload": {
+        "iss": "axe.axelabs.ai",
+        "k": "cortex.person@1.0",
+        "i": "3f0e4a1c-8b2d-4c6e-9a1f-7d5b2e8c0a44"
+      },
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJjb3J0ZXgucGVyc29uQDEuMCIsImkiOiIzZjBlNGExYy04YjJkLTRjNmUtOWExZi03ZDViMmU4YzBhNDQifQ"
+    },
+    {
+      "payload": {
+        "iss": "axe.axelabs.ai",
+        "k": "gate.workflow@1.0",
+        "i": "3f0e4a1c-8b2d-4c6e-9a1f-7d5b2e8c0a44"
+      },
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJnYXRlLndvcmtmbG93QDEuMCIsImkiOiIzZjBlNGExYy04YjJkLTRjNmUtOWExZi03ZDViMmU4YzBhNDQifQ"
+    },
+    {
+      "payload": {
+        "iss": "axe.axelabs.ai",
+        "k": "index.deal@1.0",
+        "i": "Softlanders"
+      },
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiJTb2Z0bGFuZGVycyJ9"
+    },
+    {
+      "payload": {
+        "iss": "axe.axelabs.ai",
+        "k": "index.deal@1.0",
+        "i": "Tricky_딜"
+      },
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiJUcmlja3lf65ScIn0"
+    },
+    {
+      "payload": {
+        "iss": "axe.axelabs.ai",
+        "k": "index.deal@1.0",
+        "i": "БД-42"
+      },
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiLQkdCULTQyIn0"
+    },
+    {
+      "payload": {
+        "iss": "axe.axelabs.ai",
+        "k": "index.deal@1.0",
+        "i": "café"
+      },
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiJjYWbDqSJ9"
+    },
+    {
+      "payload": {
+        "iss": "axe.axelabs.ai",
+        "k": "index.deal@1.0",
+        "i": "🙂"
+      },
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiLwn5mCIn0"
+    },
+    {
+      "payload": {
+        "iss": "axe.axelabs.ai",
+        "k": "index.deal@1.0",
+        "i": "  spaced  "
+      },
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiIgIHNwYWNlZCAgIn0"
+    },
+    {
+      "payload": {
+        "iss": "axe.axelabs.ai",
+        "k": "index.deal@1.0",
+        "i": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiJ4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eCJ9"
+    }
+  ],
+  "reject": [
+    {
+      "name": "dup-key",
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiJBIiwiaSI6IkIifQ",
+      "error": "not-canonical",
+      "note": "중복 키 — 파서가 마지막 값을 조용히 채택"
+    },
+    {
+      "name": "unknown-field",
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiJBIiwieCI6MX0",
+      "error": "not-canonical",
+      "note": "미지 필드"
+    },
+    {
+      "name": "key-order",
+      "token": "axeref1_eyJrIjoiaW5kZXguZGVhbEAxLjAiLCJpc3MiOiJheGUuYXhlbGFicy5haSIsImkiOiJBIn0",
+      "error": "not-canonical",
+      "note": "키 순서 변형"
+    },
+    {
+      "name": "whitespace",
+      "token": "axeref1_eyJpc3MiOiAiYXhlLmF4ZWxhYnMuYWkiLCAiayI6ICJpbmRleC5kZWFsQDEuMCIsICJpIjogIkEifQ",
+      "error": "not-canonical",
+      "note": "공백 삽입"
+    },
+    {
+      "name": "unicode-escape",
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiJcdTAwNDEifQ",
+      "error": "not-canonical",
+      "note": "유니코드 이스케이프"
+    },
+    {
+      "name": "legacy-v-s",
+      "token": "axeref1_eyJ2IjoxLCJpc3MiOiJheGUuYXhlbGFicy5haSIsInMiOiJpbmRleCIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiJBIn0",
+      "error": "not-canonical",
+      "note": "v2 의 v·s 필드 부활 시도"
+    },
+    {
+      "name": "wrong-issuer",
+      "token": "axeref1_eyJpc3MiOiJldmlsLmV4YW1wbGUiLCJrIjoiaW5kZXguZGVhbEAxLjAiLCJpIjoiQSJ9",
+      "error": "issuer-mismatch",
+      "note": "교차테넌트"
+    },
+    {
+      "name": "unknown-kind",
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5zZWNyZXRAMS4wIiwiaSI6IkEifQ",
+      "error": "unknown-kind",
+      "note": "미등재 kind"
+    },
+    {
+      "name": "non-object",
+      "token": "axeref1_WyJheGUuYXhlbGFicy5haSIsImluZGV4LmRlYWxAMS4wIiwiQSJd",
+      "error": "not-object",
+      "note": "최상위가 배열"
+    },
+    {
+      "name": "int-id",
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOjd9",
+      "error": "field-type",
+      "note": "i 가 문자열이 아님"
+    },
+    {
+      "name": "padded",
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiJBIn0=",
+      "error": "charset",
+      "note": "base64 패딩"
+    },
+    {
+      "name": "std-b64-alphabet",
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiLwkIC/In0",
+      "error": "charset",
+      "note": "표준 base64 알파벳(+ 또는 /) — 이 페이로드는 std 와 url 이 실제로 갈린다"
+    },
+    {
+      "name": "wrong-prefix",
+      "token": "axeref2_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiJBIn0",
+      "error": "unknown-version",
+      "note": "미래 스키마 접두사"
+    },
+    {
+      "name": "empty",
+      "token": "axeref1_",
+      "error": "charset",
+      "note": "본문 없음"
+    },
+    {
+      "name": "id-rejected",
+      "token": "axeref1_eyJpc3MiOiJheGUuYXhlbGFicy5haSIsImsiOiJpbmRleC5kZWFsQDEuMCIsImkiOiJhO2IifQ",
+      "error": "id-rejected",
+      "note": "정규형이지만 id 문법 위반"
+    },
+    {
+      "name": "token-too-long",
+      "token": "axeref1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "error": "token-too-long",
+      "note": "1024자 초과"
+    }
+  ]
+}

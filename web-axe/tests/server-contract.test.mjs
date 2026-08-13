@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { CLIENT_NAME, CLIENT_VERSION } from "../src/lib/api.ts";
 
 const require = createRequire(import.meta.url);
 const { PasswordManagerClient } = require("@bitwarden/sdk-internal");
@@ -46,6 +47,26 @@ test("카나리: SDK 의 get_password_prelogin 은 이 서버에 아직 못 쓴�
       assert.match(String(e.message), /kdf_settings/);
       return true;
     },
-    "이 테스트가 깨졌다면 서버/SDK 계약이 맞춰진 것 — src/vault.ts 의 prelogin 을 SDK 것으로 되돌릴 것",
+    "이 테스트가 깨졌다면 서버/SDK 계약이 맞춰진 것 — src/lib/auth.ts 의 prelogin 을 SDK 것으로 되돌릴 것",
   );
+});
+
+test("클라이언트 헤더가 이 서버의 스톡 web-vault 와 같은 값인지", async () => {
+  // 서버는 Bitwarden-Client-Version 이 없거나 semver 가 아니면 ERROR 를 로깅하고 버전 게이팅을
+  // 못 한다. 우리는 같은 서버의 같은 계약을 소비하는 웹 클라이언트이므로 스톡 web-vault 와 같은
+  // 값을 보낸다. 서버의 web-vault 를 올리면 이 테스트가 깨지며 src/lib/api.ts 갱신을 요구한다.
+  assert.match(CLIENT_VERSION, /^\d+\.\d+\.\d+$/, "semver 여야 서버가 파싱한다");
+  assert.equal(CLIENT_NAME, "web");
+
+  const index = await (await fetch(`${BASE}/`)).text();
+  const main = index.match(/src="(app\/main\.[a-f0-9]+\.js)"/)?.[1];
+  assert.ok(main, "index.html 에서 web-vault 메인 번들을 못 찾았다");
+
+  // 번들이 5MB 남짓이라 테스트가 몇 초 걸린다 — 드리프트를 실제로 잡는 값이라 유지한다.
+  const bundle = await (await fetch(`${BASE}/${main}`)).text();
+  const declared = bundle.match(/getApplicationVersion\(\)\{return Promise\.resolve\("([^"]+)"\)\}/)?.[1];
+  assert.ok(declared, "web-vault 번들에서 getApplicationVersion() 을 못 찾았다 (번들 구조 변경?)");
+
+  // 클라이언트는 getApplicationVersionNumber() = split(/[+|-]/)[0] 를 보낸다.
+  assert.equal(CLIENT_VERSION, declared.split(/[+|-]/)[0].trim());
 });

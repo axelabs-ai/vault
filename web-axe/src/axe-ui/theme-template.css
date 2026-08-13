@@ -1,0 +1,59 @@
+/* ============================================================
+ * theme-template.css — @axe/ui 브랜드 오버라이드 템플릿 (사본 소유 모델)
+ *
+ * 생성: `node scripts/gen-theme-template.mjs` · 값 원천 = @axe/ui tokens/colors.css
+ *
+ * ── 쓰는 법 ──
+ *   1. 이 파일을 당신 앱으로 **복사**한다(당신이 소유하는 사본).
+ *   2. 아래 값만 당신 브랜드로 교체한다(토큰 *이름* 은 바꾸지 말 것 — 계약).
+ *   3. 로드 순서를 지킨다(cascade — 뒤에 온 사본이 AXE 기본값을 이긴다):
+ *        import "@axe/ui/tokens";        (AXE 기본 토큰 — 구조층 포함)
+ *        import "./theme-template.css";  (이 사본 = 브랜드층만 재정의)
+ *        import "@axe/ui/components.css";
+ *
+ * ── 왜 브랜드층만? ──
+ *   구조층(gray ramp · bg/text · 보더 · 상태색 success/warning/danger/info ·
+ *   그림자)은 전 테넌트 공통 대비/의미 골격이라 여기 없다. 그걸 바꾸면 대비
+ *   보장·상태 색 의미가 깨진다 — 정말 필요하면 별도 논의(디자인 승인).
+ *   파생 토큰(--ring · --ring-danger)도 없다: 각각 accent/danger 와 soft
+ *   토큰을 조합하므로 아래 accent 군을 바꾸면 focus 링도 자동으로 따라온다.
+ *
+ * ── ⚠ 다크 모드 ──
+ *   값이 light-dark(<라이트>, <다크>) 형이면 **두 인자를 모두** 편집한다.
+ *   한 쪽만 바꾸면 반대 모드가 AXE 원색으로 남는다.
+ * ============================================================ */
+
+:root {
+  /* ── 브랜드 팔레트 — 정체성 표면 전용 ── */
+  /* Logo · 문서 서명 · 희소한 identity signal */
+  /* 제약: 기능 accent와 분리한다. light-dark() 두 값을 모두 교체하고 각 배경 위 AA를 확인한다. */
+  --brand-claret: light-dark(#821f3b, #d2839a);
+  /* 인쇄·PDF 문서의 masthead · 링크 · 서명 */
+  /* 제약: 호스트 dark mode와 무관한 고정 light 문서 팔레트다. brand-claret light arm과 함께 교체한다. */
+  --brand-claret-print: #821f3b;
+
+  /* ── 액센트 — raw 상태값까지 함께 소유 ── */
+  /* 기능 강조색 — 링크 · focus · Badge/Callout · selection */
+  /* 제약: 브랜드 와인과 독립된 interaction color다. 브랜드만 바꾸면 자동 추종하지 않는다. */
+  --accent: var(--palette-blue);
+  /* accent의 hover/active 상태 */
+  /* 제약: raw 값이라 브랜드 교체 시 두 모드 값을 직접 갱신한다. */
+  --accent-hover: light-dark(#0c3c5b, #82bce0);
+  /* accent 위 전경(텍스트/아이콘) */
+  /* 제약: 각 모드 accent와의 대비를 함께 검증한다. */
+  --accent-fg: light-dark(#ffffff, #181818);
+  /* accent soft 배경 — 보조 focus halo · soft 강조 · Callout 바탕 */
+  /* 제약: raw rgb이므로 브랜드 교체 시 삼원색을 직접 갱신한다. */
+  --accent-soft: light-dark(rgb(16 74 112 / 0.10), rgb(90 165 210 / 0.14));
+
+  /* ── Primary 행동 — 중립 기본, 필요할 때 명시 오버라이드 ── */
+  /* Primary 버튼 등 행동 자리 배경 */
+  /* 제약: 기본은 중립 잉크(gray-12). 브랜드 CTA를 원할 때만 오버라이드한다. */
+  --cta: var(--gray-12);
+  /* CTA hover 배경 */
+  /* 제약: 기본은 gray-11. */
+  --cta-hover: var(--gray-11);
+  /* CTA 전경(라벨) */
+  /* 제약: CTA 배경과 텍스트 대비를 검증한다. */
+  --cta-fg: var(--gray-1);
+}

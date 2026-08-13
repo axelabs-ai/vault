@@ -8,12 +8,17 @@
  *    EncString 을 고정 입력으로 복호하므로, SDK 업그레이드 시 포맷/의미 드리프트가
  *    나면 이 테스트가 깨진다 (앱이 실제로 부르는 그 API 를 그대로 부른다).
  *
- * 실행: npm test   (node --test, 추가 의존성 없음)
+ * 3. TOTP KAT: RFC 6238 Appendix B 공식 테스트 벡터. TOTP 는 PureCrypto 표면 밖이라
+ *    우리가 조립한 유일한 알고리즘 코드(카운터 + RFC 4226 dynamic truncation)이므로
+ *    표준 벡터로 못을 박는다. HMAC 자체는 WebCrypto 가 한다.
+ *
+ * 실행: npm test   (node --test, 추가 의존성 없음. .ts 는 Node 타입 스트리핑으로 직접 import)
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { webcrypto } from "node:crypto";
+import { base32Decode, generateTotp, parseTotp, totpRemainingSeconds } from "../src/lib/totp.ts";
 
 const require = createRequire(import.meta.url);
 const { PureCrypto } = require("@bitwarden/sdk-internal");
@@ -61,7 +66,7 @@ test("마스터패스워드 인증 해시: 고정 벡터 일치", async () => {
   assert.equal(b64(hash), AUTH_HASH_B64);
 });
 
-test("SDK 가 1-iteration PBKDF2 를 거부한다 (Lane B 가 WebCrypto 를 쓰는 이유)", () => {
+test("SDK 가 1-iteration PBKDF2 를 거부한다 (인증해시만 WebCrypto 를 쓰는 이유)", () => {
   assert.throws(() =>
     PureCrypto.derive_kdf_material(utf8(PASSWORD), utf8(EMAIL), { pBKDF2: { iterations: 1 } }),
   );
@@ -86,4 +91,62 @@ test("틀린 마스터패스워드는 유저키 언랩에 실패한다", () => {
   assert.throws(() =>
     PureCrypto.decrypt_user_key_with_master_password(WRAPPED_USER_KEY, "wrong-password", EMAIL, KDF),
   );
+});
+
+/* ------------------------------------------------------------------ TOTP (RFC 6238) */
+
+// RFC 6238 Appendix B 의 공식 시드. SHA-1 = ASCII "12345678901234567890" (20B),
+// SHA-256 = 32B, SHA-512 = 64B — 같은 문자열을 필요한 길이만큼 반복한 것이다.
+const rfcSeed = (bytes) => new TextEncoder().encode("12345678901234567890".repeat(4).slice(0, bytes));
+
+test("TOTP KAT: RFC 6238 Appendix B SHA-1 벡터 6개 전부 일치", async () => {
+  const params = { secret: rfcSeed(20), algorithm: "SHA-1", digits: 8, period: 30 };
+  const vectors = [
+    [59, "94287082"],
+    [1111111109, "07081804"],
+    [1111111111, "14050471"],
+    [1234567890, "89005924"],
+    [2000000000, "69279037"],
+    [20000000000, "65353130"],
+  ];
+  for (const [seconds, expected] of vectors) {
+    assert.equal(await generateTotp(params, seconds * 1000), expected, `T=${seconds}`);
+  }
+});
+
+test("TOTP KAT: RFC 6238 SHA-256 / SHA-512 벡터 (알고리즘 파라미터 배선 확인)", async () => {
+  assert.equal(
+    await generateTotp({ secret: rfcSeed(32), algorithm: "SHA-256", digits: 8, period: 30 }, 59_000),
+    "46119246",
+  );
+  assert.equal(
+    await generateTotp({ secret: rfcSeed(64), algorithm: "SHA-512", digits: 8, period: 30 }, 59_000),
+    "90693936",
+  );
+});
+
+test("base32 디코드: 표준 TOTP 시드 인코딩 왕복", () => {
+  const decoded = base32Decode("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+  assert.equal(Buffer.from(decoded).toString("utf8"), "12345678901234567890");
+  // 공백·하이픈·패딩을 관대하게 받는다 (사람이 붙여넣는 형태).
+  assert.equal(b64(base32Decode("gezd gnbv-gy3t qojq==")), b64(base32Decode("GEZDGNBVGY3TQOJQ")));
+  assert.throws(() => base32Decode("GEZD!!!"), /base32/);
+});
+
+test("otpauth URI 파싱: 알고리즘·자리수·주기를 항목 값에서 읽는다", () => {
+  const p = parseTotp("otpauth://totp/AXE:me@axelabs.ai?secret=GEZDGNBVGY3TQOJQ&algorithm=SHA256&digits=8&period=60");
+  assert.equal(p.algorithm, "SHA-256");
+  assert.equal(p.digits, 8);
+  assert.equal(p.period, 60);
+  // 맨 base32 시드는 Bitwarden 기본값(SHA-1 / 6자리 / 30초)으로 해석한다.
+  const bare = parseTotp("GEZDGNBVGY3TQOJQ");
+  assert.deepEqual([bare.algorithm, bare.digits, bare.period], ["SHA-1", 6, 30]);
+  // 미지원 형식은 조용히 틀린 코드를 내지 않고 즉시 거부한다.
+  assert.throws(() => parseTotp("steam://ABCDEF"), /Steam/);
+});
+
+test("TOTP 카운트다운: 스텝 경계에서 period 로 리셋된다", () => {
+  assert.equal(totpRemainingSeconds(30, 59_000), 1);
+  assert.equal(totpRemainingSeconds(30, 60_000), 30);
+  assert.equal(totpRemainingSeconds(30, 61_000), 29);
 });

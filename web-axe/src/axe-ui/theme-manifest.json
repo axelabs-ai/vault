@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "title": "브랜드 팔레트 — 정체성 표면 전용",
+      "tokens": [
+        {
+          "name": "--brand-claret",
+          "tier": "root",
+          "override": "뿌리 교체",
+          "role": "AXE 브랜드 와인",
+          "use": "Logo · 문서 서명 · 희소한 identity signal",
+          "note": "기능 accent와 분리한다. light-dark() 두 값을 모두 교체하고 각 배경 위 AA를 확인한다."
+        },
+        {
+          "name": "--brand-claret-print",
+          "tier": "root",
+          "override": "직접 교체(raw)",
+          "role": "흰 종이 문서용 브랜드 와인",
+          "use": "인쇄·PDF 문서의 masthead · 링크 · 서명",
+          "note": "호스트 dark mode와 무관한 고정 light 문서 팔레트다. brand-claret light arm과 함께 교체한다."
+        }
+      ]
+    },
+    {
+      "title": "액센트 — raw 상태값까지 함께 소유",
+      "tokens": [
+        {
+          "name": "--accent",
+          "tier": "accent",
+          "override": "직접 교체",
+          "role": "기능 강조 — 링크 · focus · Badge · selection",
+          "use": "기능 강조색 — 링크 · focus · Badge/Callout · selection",
+          "note": "브랜드 와인과 독립된 interaction color다. 브랜드만 바꾸면 자동 추종하지 않는다."
+        },
+        {
+          "name": "--accent-hover",
+          "tier": "accent",
+          "override": "직접 교체(raw)",
+          "role": "accent hover/active",
+          "use": "accent의 hover/active 상태",
+          "note": "raw 값이라 브랜드 교체 시 두 모드 값을 직접 갱신한다."
+        },
+        {
+          "name": "--accent-fg",
+          "tier": "accent",
+          "override": "직접 교체(raw)",
+          "role": "accent 위 전경(대비 파트너)",
+          "use": "accent 위 전경(텍스트/아이콘)",
+          "note": "각 모드 accent와의 대비를 함께 검증한다."
+        },
+        {
+          "name": "--accent-soft",
+          "tier": "accent",
+          "override": "직접 교체(raw)",
+          "role": "accent soft 배경",
+          "use": "accent soft 배경 — 보조 focus halo · soft 강조 · Callout 바탕",
+          "note": "raw rgb이므로 브랜드 교체 시 삼원색을 직접 갱신한다."
+        }
+      ]
+    },
+    {
+      "title": "Primary 행동 — 중립 기본, 필요할 때 명시 오버라이드",
+      "tokens": [
+        {
+          "name": "--cta",
+          "tier": "cta",
+          "override": "선택(중립 기본)",
+          "role": "Primary 행동 배경",
+          "use": "Primary 버튼 등 행동 자리 배경",
+          "note": "기본은 중립 잉크(gray-12). 브랜드 CTA를 원할 때만 오버라이드한다."
+        },
+        {
+          "name": "--cta-hover",
+          "tier": "cta",
+          "override": "선택(중립 기본)",
+          "role": "CTA hover",
+          "use": "CTA hover 배경",
+          "note": "기본은 gray-11."
+        },
+        {
+          "name": "--cta-fg",
+          "tier": "cta",
+          "override": "선택(중립 기본)",
+          "role": "CTA 전경",
+          "use": "CTA 전경(라벨)",
+          "note": "CTA 배경과 텍스트 대비를 검증한다."
+        }
+      ]
+    }
+  ]
+}

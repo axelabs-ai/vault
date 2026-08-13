@@ -1,14 +1,16 @@
 {
-  "name": "axe-vault-web-poc",
+  "name": "axe-vault-web",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "type": "module",
-  "description": "B-vault-axe-frontend PoC spike — Bitwarden 공식 크립토(WASM SDK) 재사용 검증",
+  "description": "AXE Vault 웹 클라이언트 (B-vault-axe-frontend P1) — Bitwarden 공식 WASM 크립토 + @axe/ui 3-zone 워크스페이스",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "node --test \"tests/*.test.mjs\""
+    "test": "node --test \"tests/*.test.mjs\"",
+    "axe-ui:sync": "node ../../axelabs/scripts/export-axe-ui.mjs --config axe-ui.consumer.json --provider-commit \"$(git -C ../../axelabs rev-parse HEAD)\"",
+    "axe-ui:check": "node ../../axelabs/scripts/export-axe-ui.mjs --config axe-ui.consumer.json --provider-commit \"$(git -C ../../axelabs rev-parse HEAD)\" --check"
   },
   "dependencies": {
     "@bitwarden/sdk-internal": "0.2.0-main.967",

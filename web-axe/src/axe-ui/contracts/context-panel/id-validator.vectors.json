@@ -1,0 +1,269 @@
+{
+  "schema": "@axe/ui/context-panel-id-validator@1",
+  "note": "id 거부 문법. 판정은 유니코드 **일반 카테고리 질의**로 한다 — 문자 리터럴 denylist 로 적으면 유니코드 버전이 올라갈 때 조용히 구멍이 열린다. id 는 절단·치환·정규화하지 않는다: 위반은 거부이고 거부는 카드 미렌더다.",
+  "limits": {
+    "maxIdBytes": 128
+  },
+  "deniedCategories": [
+    "Cc",
+    "Cf",
+    "Zl",
+    "Zp"
+  ],
+  "deniedSpaceSeparators": "U+0020 이외의 모든 Zs",
+  "shellMetacharacters": [
+    "'",
+    "\"",
+    "\\",
+    "$",
+    "`",
+    ";",
+    "|",
+    "&",
+    "<",
+    ">",
+    "(",
+    ")",
+    "{",
+    "}",
+    "[",
+    "]",
+    "*",
+    "?",
+    "~",
+    "#"
+  ],
+  "accept": [
+    {
+      "id": "3f0e4a1c-8b2d-4c6e-9a1f-7d5b2e8c0a44",
+      "note": "gate uuid"
+    },
+    {
+      "id": "Softlanders",
+      "note": "index deal_code"
+    },
+    {
+      "id": "BP-42",
+      "note": "blueprint 식별자 형태"
+    },
+    {
+      "id": "Tricky_딜",
+      "note": "한글 Letter — 스크립트 allowlist 가 아니라 위험 카테고리 denylist"
+    },
+    {
+      "id": "café",
+      "note": "라틴 확장"
+    },
+    {
+      "id": "БД-42",
+      "note": "키릴"
+    },
+    {
+      "id": "🙂",
+      "note": "BMP 밖 코드포인트"
+    },
+    {
+      "id": "  spaced  ",
+      "note": "U+0020 은 허용 Zs"
+    },
+    {
+      "id": "a b",
+      "note": "내부 공백"
+    },
+    {
+      "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "note": "UTF-8 128 B 경계 = 통과"
+    },
+    {
+      "id": "딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜ab",
+      "note": "비-ASCII 128 B 경계 = 통과"
+    }
+  ],
+  "reject": [
+    {
+      "id": "",
+      "reason": "empty",
+      "note": "빈 id"
+    },
+    {
+      "id": "-rf",
+      "reason": "leading-hyphen",
+      "note": "선행 하이픈 = argv 에서 플래그가 된다"
+    },
+    {
+      "id": "--help",
+      "reason": "leading-hyphen",
+      "note": "동상"
+    },
+    {
+      "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "reason": "too-long",
+      "note": "UTF-8 129 B"
+    },
+    {
+      "id": "딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜딜",
+      "reason": "too-long",
+      "note": "비-ASCII 129 B"
+    },
+    {
+      "id": "a\nb",
+      "reason": "denied-category",
+      "note": "U+000A Cc"
+    },
+    {
+      "id": "a\tb",
+      "reason": "denied-category",
+      "note": "U+0009 Cc"
+    },
+    {
+      "id": "a​b",
+      "reason": "denied-category",
+      "note": "U+200B ZERO WIDTH SPACE — Cf 이지 Cc 가 아니다"
+    },
+    {
+      "id": "a‍b",
+      "reason": "denied-category",
+      "note": "U+200D ZWJ — Cf"
+    },
+    {
+      "id": "a﻿b",
+      "reason": "denied-category",
+      "note": "U+FEFF — Cf"
+    },
+    {
+      "id": "a‮b",
+      "reason": "denied-category",
+      "note": "U+202E RLO bidi override — Cf"
+    },
+    {
+      "id": "a⁦b",
+      "reason": "denied-category",
+      "note": "U+2066 LRI — Cf"
+    },
+    {
+      "id": "a؜b",
+      "reason": "denied-category",
+      "note": "U+061C ALM — Cf"
+    },
+    {
+      "id": "a b",
+      "reason": "denied-category",
+      "note": "U+2028 Zl"
+    },
+    {
+      "id": "a b",
+      "reason": "denied-category",
+      "note": "U+2029 Zp"
+    },
+    {
+      "id": "a　b",
+      "reason": "non-space-separator",
+      "note": "U+3000 IDEOGRAPHIC SPACE — Zs 이지만 U+0020 이 아니다"
+    },
+    {
+      "id": "a b",
+      "reason": "non-space-separator",
+      "note": "U+00A0 NBSP — Zs"
+    },
+    {
+      "id": "a'b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"'\""
+    },
+    {
+      "id": "a\"b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"\\\"\""
+    },
+    {
+      "id": "a\\b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"\\\\\""
+    },
+    {
+      "id": "a$b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"$\""
+    },
+    {
+      "id": "a`b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"`\""
+    },
+    {
+      "id": "a;b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \";\""
+    },
+    {
+      "id": "a|b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"|\""
+    },
+    {
+      "id": "a&b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"&\""
+    },
+    {
+      "id": "a<b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"<\""
+    },
+    {
+      "id": "a>b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \">\""
+    },
+    {
+      "id": "a(b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"(\""
+    },
+    {
+      "id": "a)b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \")\""
+    },
+    {
+      "id": "a{b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"{\""
+    },
+    {
+      "id": "a}b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"}\""
+    },
+    {
+      "id": "a[b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"[\""
+    },
+    {
+      "id": "a]b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"]\""
+    },
+    {
+      "id": "a*b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"*\""
+    },
+    {
+      "id": "a?b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"?\""
+    },
+    {
+      "id": "a~b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"~\""
+    },
+    {
+      "id": "a#b",
+      "reason": "shell-metacharacter",
+      "note": "셸 메타문자 \"#\""
+    }
+  ]
+}

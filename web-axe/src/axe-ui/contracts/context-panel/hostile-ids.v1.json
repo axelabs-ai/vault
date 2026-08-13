@@ -1,0 +1,151 @@
+{
+  "schema": "@axe/ui/context-panel-hostile-ids@1",
+  "note": "적대 id 코퍼스. 원소·순서는 scratchpad/ref_codec_probe.py 의 corpus 와 동일하고, 판정은 이 킷의 참조 구현이 실측한 값이다. `idRejection` = validator 층 판정, `decodeError` = 코덱 층 판정 — 층마다 먼저 걸리는 규칙이 달라 두 값이 다를 수 있다(예: 600자 id 는 payload 상한이 id 상한보다 먼저 걸린다). 세 언어 구현은 이 표를 그대로 재현해야 한다.",
+  "issuer": "axe.axelabs.ai",
+  "kind": "index.deal@1.0",
+  "measured": {
+    "total": 23,
+    "accepted": 5,
+    "rejected": 18
+  },
+  "corpus": [
+    {
+      "id": "O'; touch PWNED; echo '",
+      "idRejection": "shell-metacharacter",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "$(rm -rf /)",
+      "idRejection": "shell-metacharacter",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "`id`",
+      "idRejection": "shell-metacharacter",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "a\nb",
+      "idRejection": "denied-category",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "a b",
+      "idRejection": "denied-category",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "‮evil",
+      "idRejection": "denied-category",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "​zero",
+      "idRejection": "denied-category",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "--help",
+      "idRejection": "leading-hyphen",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "-rf",
+      "idRejection": "leading-hyphen",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "*",
+      "idRejection": "shell-metacharacter",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "|nc h 1",
+      "idRejection": "shell-metacharacter",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "",
+      "idRejection": "empty",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "idRejection": "too-long",
+      "decodeError": "payload-too-long",
+      "shapeOk": true
+    },
+    {
+      "id": "Tricky_딜",
+      "idRejection": null,
+      "decodeError": null,
+      "shapeOk": true
+    },
+    {
+      "id": "quote\"back\\slash/slash\ttab",
+      "idRejection": "shell-metacharacter",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "  spaced  ",
+      "idRejection": null,
+      "decodeError": null,
+      "shapeOk": true
+    },
+    {
+      "id": "　ideo",
+      "idRejection": "non-space-separator",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "café",
+      "idRejection": null,
+      "decodeError": null,
+      "shapeOk": true
+    },
+    {
+      "id": "БД-42",
+      "idRejection": null,
+      "decodeError": null,
+      "shapeOk": true
+    },
+    {
+      "id": "🙂",
+      "idRejection": null,
+      "decodeError": null,
+      "shapeOk": true
+    },
+    {
+      "id": "a;b",
+      "idRejection": "shell-metacharacter",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "x&y",
+      "idRejection": "shell-metacharacter",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    },
+    {
+      "id": "p|q",
+      "idRejection": "shell-metacharacter",
+      "decodeError": "id-rejected",
+      "shapeOk": true
+    }
+  ]
+}
