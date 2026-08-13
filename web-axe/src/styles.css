@@ -1,0 +1,213 @@
+/* PoC 전용 최소 스타일.
+ * @axe/ui 토큰(axelabs/src/lib/tokens/colors.css)에서 필요한 값만 손으로 옮겨 왔다.
+ * 정식 Consumer Kit 배선(export-axe-ui.mjs)은 P1 몫 — 여기서는 "대충 AXE 룩"이 목표. */
+:root {
+  color-scheme: light dark;
+  --gray-1: light-dark(#f7f7f6, #181818);
+  --gray-2: light-dark(#f3f3f2, #202020);
+  --gray-3: light-dark(#eaeae8, #272727);
+  --gray-6: light-dark(#dcdcd9, #333);
+  --gray-11: light-dark(#4b4b48, #b5b5b5);
+  --gray-12: light-dark(#20201e, #f2f2f2);
+  --wine: light-dark(#7b2436, #c76b7d);
+  --accent: light-dark(#2f6feb, #6ea0ff);
+  --danger: light-dark(#c4321f, #f26a55);
+  --danger-soft: light-dark(#fbe7e2, rgb(242 106 85 / 0.1));
+  --ok: light-dark(#1f7a4d, #56c08a);
+  --radius: 8px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--gray-1);
+  color: var(--gray-12);
+  font:
+    15px/1.55 -apple-system,
+    BlinkMacSystemFont,
+    "Pretendard Variable",
+    Pretendard,
+    system-ui,
+    sans-serif;
+}
+
+.wrap {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+}
+
+header h1 {
+  font-size: 20px;
+  margin: 0 0 4px;
+  letter-spacing: -0.01em;
+}
+header h1 span {
+  color: var(--wine);
+}
+header p {
+  margin: 0 0 28px;
+  color: var(--gray-11);
+  font-size: 13px;
+}
+
+.card {
+  background: var(--gray-2);
+  border: 1px solid var(--gray-6);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.card h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--gray-11);
+  margin: 0 0 14px;
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--gray-11);
+  margin: 0 0 4px;
+}
+input {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--gray-6);
+  border-radius: 6px;
+  background: var(--gray-1);
+  color: var(--gray-12);
+  font-size: 14px;
+  margin-bottom: 12px;
+  font-family: inherit;
+}
+input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.row > * {
+  flex: 1;
+  min-width: 180px;
+}
+
+button {
+  font: inherit;
+  font-size: 14px;
+  padding: 9px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--gray-6);
+  background: var(--gray-3);
+  color: var(--gray-12);
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button.primary {
+  background: var(--wine);
+  border-color: var(--wine);
+  color: #fff;
+}
+button.mini {
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+pre {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--gray-1);
+  border: 1px solid var(--gray-6);
+  border-radius: 6px;
+  padding: 12px;
+  overflow-x: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.err {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.note {
+  font-size: 12px;
+  color: var(--gray-11);
+  margin: 10px 0 0;
+}
+.ok {
+  color: var(--ok);
+}
+.badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--gray-6);
+  background: var(--gray-1);
+  color: var(--gray-11);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+th,
+td {
+  text-align: left;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--gray-6);
+  vertical-align: top;
+}
+th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--gray-11);
+}
+td.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.stats {
+  display: flex;
+  gap: 20px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.stats div {
+  font-size: 12px;
+  color: var(--gray-11);
+}
+.stats b {
+  display: block;
+  font-size: 19px;
+  color: var(--gray-12);
+  font-weight: 600;
+}
