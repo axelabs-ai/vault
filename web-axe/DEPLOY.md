@@ -88,14 +88,30 @@ Vite 가 이미 **content-hash 파일명**을 붙인다 (`index-CUA0DEhF.js`, `P
 | `/axe/assets/*` (js·css·woff2) | `public, max-age=31536000, immutable` | 파일명에 content hash → 내용이 바뀌면 이름이 바뀐다 |
 | `/axe/assets/*.wasm` | `public, max-age=31536000, immutable` | 동일. 아래 WASM 절 참조 |
 
+⚠️ **nginx `add_header` 상속 함정 (리뷰 반영)**: location 블록에 `add_header` 가 **하나라도** 있으면
+부모(server) 레벨의 `add_header` 는 **전부 상속되지 않는다.** 아래처럼 캐시 헤더만 추가하면 그
+응답들은 5절의 보안 헤더를 통째로 잃는다. 그래서 보안 헤더 전체를 스니펫으로 빼고, `add_header`
+를 쓰는 **모든** location 에서 다시 include 한다:
+
 ```nginx
-location = /axe/index.html {
-  add_header Cache-Control "no-cache";
-}
-location /axe/assets/ {
-  add_header Cache-Control "public, max-age=31536000, immutable";
+# /etc/nginx/snippets/axe-security-headers.conf — 5절의 add_header 7줄 전체가 여기 들어간다
+
+server {
+  include snippets/axe-security-headers.conf;   # add_header 없는 location 들의 기본값
+
+  location = /axe/index.html {
+    include snippets/axe-security-headers.conf; # add_header 를 쓰는 순간 상속이 끊기므로 재-include 필수
+    add_header Cache-Control "no-cache" always;
+  }
+  location /axe/assets/ {
+    include snippets/axe-security-headers.conf;
+    add_header Cache-Control "public, max-age=31536000, immutable" always;
+  }
 }
 ```
+
+배포 검증 시 `curl -sI` 로 **세 경로 모두**( `/axe/` · `/axe/index.html` · `/axe/assets/<파일>` )에서
+CSP 헤더가 실제로 나오는지 확인할 것 — 이 함정은 설정이 조용히 통과하고 헤더만 사라진다.
 
 ### WASM 이 캐싱 설계의 중심인 이유
 
@@ -105,8 +121,10 @@ location /axe/assets/ {
 1. **`Content-Type: application/wasm` 필수.** 이게 틀리면 `WebAssembly.instantiateStreaming` 이
    스트리밍 컴파일을 포기하고 전체 다운로드 후 컴파일로 떨어진다. nginx `mime.types` 최신본에는
    있으나 확인할 것 — `types { application/wasm wasm; }`.
-2. **압축은 사전 압축으로.** 7.5 MB 를 매 요청 gzip 하는 건 낭비다. 빌드 때 `.wasm.br`/`.wasm.gz` 를
-   만들어 두고 `gzip_static on; brotli_static on;` 으로 낸다. Brotli 가 gzip 대비 눈에 띄게 작다.
+2. **압축은 사전 압축으로.** 7.5 MB 를 매 요청 gzip 하는 건 낭비다. 빌드 때 `.wasm.gz` 를 만들어 두고
+   `gzip_static on` 으로 낸다. ⚠️ `brotli_static` 은 쓰지 않는다 (리뷰 반영) — 공식 `nginx:alpine`
+   이미지에는 brotli 모듈이 없어 그 지시어가 기동 실패를 부른다. Brotli(gzip 대비 ~15% 추가 절감)가
+   정말 필요해지면 ngx_brotli 를 포함해 빌드된 이미지로 교체하는 별도 결정으로 다룬다.
 3. **immutable 이 실질적으로 유일한 최적화.** 파일명 해시 덕에 첫 방문 후 재방문은 네트워크 0 이다.
    SDK 를 올리면 해시가 바뀌어 자동으로 새로 받는다 — 무효화 절차가 따로 없다.
 4. 폰트도 같은 규칙을 탄다. Pretendard 는 **dynamic subset** 이라 실제로 쓰이는 서브셋 몇 개만
