@@ -72,6 +72,9 @@ ingress:
 FROM nginx:alpine
 COPY dist/ /usr/share/nginx/html/axe/
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+# 4절 location 들이 include 하는 보안 헤더 스니펫 — 이 COPY 가 빠지면 include 대상
+# 부재로 nginx 설정 검증/기동이 실패한다 (리뷰 반영).
+COPY axe-security-headers.conf /etc/nginx/snippets/axe-security-headers.conf
 ```
 
 `dist/` 를 `/axe/` 아래에 두면 nginx `try_files` 가 프리픽스를 그대로 서빙한다. SPA 라우팅이
