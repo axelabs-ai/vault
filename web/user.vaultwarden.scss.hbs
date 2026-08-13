@@ -1,0 +1,374 @@
+// ============================================================================
+// axe-theme — @axe/ui brand skin for the OIDCWarden web vault
+//
+//   SoT              : vault repo `web/user.vaultwarden.scss.hbs` (this file)
+//   Deploy           : `web/deploy-theme.sh` → EC2 i-017843dbd97a00b3f
+//                      /opt/axe/data/vault/templates/scss/ + docker restart
+//   Token source     : /Users/axe/axelabs/src/lib  (@axe/ui, read-only 정본)
+//                        tokens/colors.css     — 팔레트 (light-dark() 양 arm)
+//                        tokens/fonts.css      — 폰트 스택
+//                        tokens/spacing.css    — radius
+//   @axe/ui version  : 0.28.0  (src/lib/VERSION, 2026-08-12)
+//   Snapshot date    : 2026-08-13
+//
+//   ⚠ 값 하드카피 — @axe/ui 갱신 시 재추출할 것.
+//     @axe/ui 는 `light-dark(<라이트>, <다크>)` 단일 선언으로 두 arm 을 들고
+//     있으나, 웹볼트는 `html.theme_light` / `html.theme_dark` 클래스 스위치라
+//     여기서는 두 arm 을 **분리해 하드카피**한다. 즉 이 파일은 @axe/ui 를
+//     import 하지 않는 스냅샷이며, 정본이 바뀌어도 자동 추종하지 않는다.
+//     Consumer Kit(export-axe-ui.mjs) 경로가 아니라는 점도 의도적 —
+//     vault 는 OIDCWarden 업스트림 자산 위에 CSS 만 얹는 소비자다.
+//
+// ── 적용 메커니즘 (실측 2026-08-13) ────────────────────────────────────────
+//   서버가 `GET /css/vaultwarden.css` 를 렌더할 때 templates/scss/ 의
+//   vaultwarden.scss.hbs 끝에서 이 파일을 handlebars partial 로 include 한 뒤
+//   grass(OutputStyle::**Compressed**)로 컴파일한다 (src/api/web.rs).
+//     · SCSS 컴파일 실패 → load_user_scss=false 로 폴백 재컴파일. 볼트 안 죽음.
+//     · Compressed = **주석 전부 제거**. 따라서 배포 마커는 주석이 아니라
+//       실제 선언 `--axe-theme` 으로 둔다 (deploy-theme.sh 가 이걸 grep).
+//     · handlebars partial 이므로 `{`+`{` 2연속 시퀀스 금지 (템플릿 문법 충돌).
+//     · 템플릿은 부팅 시 로드 → 배치 후 `docker restart vaultwarden` 필요.
+//     · 응답에 `Cache-Control: public, max-age=86400` + Cloudflare 캐시(HIT
+//       실측) → 배포 후 `axe cf purge <url>` 필요. 안 하면 최대 24h 구버전.
+//
+// ── 우선순위(specificity) 규칙 — 이 파일에서 가장 중요한 함정 ──────────────
+//   index.html 로드 순서가 `css/vaultwarden.css` → `styles.<hash>.css` 라
+//   **우리 파일이 먼저** 온다. 웹볼트 토큰은 `:root`(0,1,0) 와
+//   `.theme_dark`(0,1,0) 에 선언되므로, 동일 specificity 로 쓰면 나중에 오는
+//   styles.css 가 이겨 우리 override 가 통째로 죽는다. 그래서 전부 한 단계
+//   올려 쓴다:
+//     html:root                    (0,1,1)  — 테마 무관 (primitive·폰트·nav)
+//     html:root:not(.theme_dark)   (0,2,1)  — 라이트 전용
+//     html:root.theme_dark         (0,2,1)  — 다크 전용
+//   라이트를 `.theme_light` 가 아니라 `:not(.theme_dark)` 로 잡는 이유:
+//   theme_head.js 는 항상 둘 중 하나를 붙이지만, `:not()` 이 클래스 누락
+//   상황까지 흡수해 무브랜드 렌더를 막는다.
+//
+// ── 스코프 ────────────────────────────────────────────────────────────────
+//   Tier 1 (적용): 팔레트(라이트/다크), 타이포, 포커스 링, 보더, 레일.
+//   Tier 2 (미적용): app-vault-item-dialog 우측 도킹 — 아래 사유 주석 참조.
+//   로고 이미지 교체는 범위 밖 (CSS only).
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// 1. 테마 무관 — 마커 · 타이포 · primitive 팔레트
+// ---------------------------------------------------------------------------
+html:root {
+  // 배포 마커. Compressed 컴파일이 주석을 지우므로 실선언으로 남긴다.
+  --axe-theme: "0.1.0 axe-theme 2026-08-13 axe-ui-0.28.0";
+
+  // ---- 타이포 ----
+  // @axe/ui 본문 = Pretendard Variable, mono = Sarasa Fixed K. 둘 다 소비자
+  // same-origin self-host 자산인데 vault.axelabs.ai 는 그 자산을 서빙하지
+  // 않는다 → 여기서는 **로드하지 않고** 스택에만 남긴다. 사용자 로컬에
+  // 설치돼 있으면 집히고(무비용 progressive enhancement), 아니면 @axe/ui 가
+  // 지정한 metric-matched 시스템 폴백(Apple SD Gothic Neo / Malgun Gothic)
+  // 으로 근사한다. Inter 는 웹볼트가 self-host 하므로 Linux 등 시스템 UI
+  // 폰트가 약한 환경의 라틴 폴백으로 뒤쪽에 남겨 둔다(한글 커버리지는 없어
+  // 글자 단위로 다음 폰트가 받는다).
+  --font-sans:
+    "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont,
+    "Apple SD Gothic Neo", "Segoe UI", "Malgun Gothic", Roboto, Inter,
+    "Helvetica Neue", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
+    "Segoe UI Symbol", "Noto Color Emoji";
+  --font-mono:
+    "Sarasa Fixed K", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+
+  // ---- primitive: 중립 ramp ----
+  // 웹볼트 gray-050..950 은 라이트/다크가 **공유**하는 단일 ramp 다 (라이트는
+  // 밝은 쪽 050~300 을 배경으로, 다크는 어두운 쪽 800~950 을 배경으로 읽는다).
+  // @axe/ui 는 라이트 ramp(gray-1..12)와 다크 ramp(gray-1..12)가 따로라
+  // 050~700 = @axe/ui **라이트** ramp, 800~950 = @axe/ui **다크** ramp 를
+  // 이어 붙여 하나의 단조 ramp 로 만든다. 700→800 의 큰 점프가 라이트/다크
+  // 경계이며 의도적이다.
+  --color-gray-050: #f7f7f6; // axe light gray-1  — app background
+  --color-gray-100: #efefee; // axe light gray-3
+  --color-gray-200: #e4e4e2; // axe light gray-5
+  --color-gray-300: #d5d5d2; // axe light gray-7
+  --color-gray-400: #b8b8b4; // axe light gray-8
+  --color-gray-500: #8a8a86; // axe light gray-9
+  --color-gray-600: #686865; // axe light gray-10 — text-tertiary
+  --color-gray-700: #4b4b48; // axe light gray-11 — text-secondary
+  --color-gray-800: #292929; // axe dark  gray-3  — rail / elevated foundation
+  --color-gray-900: #202020; // axe dark  gray-2
+  --color-gray-950: #181818; // axe dark  gray-1  — app background (dark)
+  --color-gray-400-rgb: 184, 184, 180;
+  --color-gray-950-rgb: 24, 24, 24;
+
+  // ---- primitive: brand = AXE claret ----
+  // 웹볼트가 brand-700(라이트 fg)·brand-400(다크 fg)을 앵커로 쓰므로 그 두
+  // 자리에 @axe/ui `--brand-claret` 양 arm 을 정확히 앉힌다.
+  --color-brand-050: #fdf3f6;
+  --color-brand-100: #f9e1e8;
+  --color-brand-200: #f2c3d0;
+  --color-brand-300: #e79fb2;
+  --color-brand-400: #d2839a; // axe --brand-claret (dark arm)
+  --color-brand-500: #b85f79;
+  --color-brand-600: #9c3d59;
+  --color-brand-700: #821f3b; // axe --brand-claret (light arm) — canonical
+  --color-brand-800: #6b1930;
+  --color-brand-900: #4f1224;
+  --color-brand-950: #340c18;
+  --color-brand-950-rgb: 52, 12, 24;
+
+  // ---- primitive: 상태색 ----
+  // 앵커 = @axe/ui --success/--warning/--danger 의 라이트/다크 arm + *-soft.
+  // 웹볼트 다크는 `*-950`(soft) / `*-900`(medium) 을 배경으로 읽으므로
+  // @axe/ui 다크 soft 값을 900 에 두고 950 은 한 단계 더 깊게 잡아 단조성
+  // 유지.
+  --color-green-050: #e5f1ed; // axe --success-soft (light)
+  --color-green-100: #c9e3db;
+  --color-green-200: #a3d1c3;
+  --color-green-300: #7cbfab;
+  --color-green-400: #5dad95; // axe --palette-green (dark arm)
+  --color-green-500: #3d8f76;
+  --color-green-600: #1e6f58;
+  --color-green-700: #00523f; // axe --palette-green (light arm)
+  --color-green-800: #044334;
+  --color-green-900: #203b34; // axe --success-soft (dark)
+  --color-green-950: #1a332c;
+
+  --color-orange-050: #f4e9e1; // axe --warning-soft (light)
+  --color-orange-100: #f0dcc9;
+  --color-orange-200: #eec9a8;
+  --color-orange-300: #efab7c;
+  --color-orange-400: #ea8d56; // axe --palette-orange (dark arm)
+  --color-orange-500: #c9702f;
+  --color-orange-600: #9b562e; // axe --palette-orange (light arm)
+  --color-orange-700: #7f4526;
+  --color-orange-800: #63351d;
+  --color-orange-900: #463329; // axe --warning-soft (dark)
+  --color-orange-950: #38271e;
+
+  --color-red-050: #fbe7e2; // axe --danger-soft (light)
+  --color-red-100: #f8d3ca;
+  --color-red-200: #f4b3a4;
+  --color-red-300: #f28f7a;
+  --color-red-400: #f26a55; // axe --danger (dark arm)
+  --color-red-500: #dc4d36;
+  --color-red-600: #d13f28;
+  --color-red-700: #c4321f; // axe --danger (light arm)
+  --color-red-800: #9c2818;
+  --color-red-900: #6b1d13;
+  --color-red-950: #3a2019;
+
+  // teal = 웹볼트 "accent-primary" 자리 → @axe/ui 기능 accent 블루로 치환.
+  // (@axe/ui 에는 teal 이 없다. accent-primary 가 상호작용 accent 역할이라
+  //  --palette-blue 를 앉히는 것이 의미상 정확하다. 아바타 teal 도 함께
+  //  파랑이 되지만 아바타는 색 구분만 하면 되므로 무해하다.)
+  --color-teal-050: #e7f0f5; // axe --info-soft (light)
+  --color-teal-100: #cfe1ec;
+  --color-teal-200: #a9c9de;
+  --color-teal-300: #7fb3d3;
+  --color-teal-400: #5aa5d2; // axe --palette-blue (dark arm)
+  --color-teal-500: #3382b4;
+  --color-teal-600: #1d6493;
+  --color-teal-700: #104a70; // axe --palette-blue (light arm) = --accent
+  --color-teal-800: #0c3c5b; // axe --accent-hover (light)
+  --color-teal-900: #213746; // axe --info-soft (dark)
+  --color-teal-950: #16262f;
+
+  // coral / purple / pink / yellow 는 손대지 않는다 — 아바타 색 구분과 극히
+  // 드문 accent-secondary/tertiary 자리에만 쓰이고, @axe/ui 에 대응 토큰이
+  // 없어 임의 매핑은 의미를 더하지 못한다. (ponytail: yagni)
+
+  // ---- 레일(bit-side-nav) ----
+  // 웹볼트 레일은 라이트/다크 **양쪽 다** --color-nav-bg-primary =
+  // gray-800 이라, 위 ramp 만으로 이미 @axe/ui 다크 레일(#292929)이 된다.
+  // 남은 건 hover/active 와 divider 인데, 기본값이 라이트에서 검정 알파
+  // (rgba(black,.2)) 라 어두운 레일 위에서 "더 어두워지는" 반전 동작이다.
+  // @axe/ui 레일은 어두운 표면 위에서 **밝아지는** 흰 알파를 쓰므로 교정.
+  // 양 테마 값이 같으므로 테마 무관 블록에 둔다.
+  --color-nav-bg-primary-hover: rgba(255, 255, 255, 0.08);
+  --color-nav-bg-primary-hover-strong: rgba(255, 255, 255, 0.14);
+  --color-nav-bg-secondary-hover: rgba(255, 255, 255, 0.08);
+  --color-nav-bg-secondary-hover-strong: rgba(255, 255, 255, 0.14);
+  --color-nav-border-primary: rgba(255, 255, 255, 0.12);
+}
+
+// ---------------------------------------------------------------------------
+// 2. 라이트 테마
+// ---------------------------------------------------------------------------
+html:root:not(.theme_dark) {
+  // ---- 레거시 space-separated RGB 토큰 ----
+  // Tailwind `rgb(var(--token) / <alpha>)` 로 소비되는 구세대 토큰. hex
+  // primitive 를 참조하지 않는 리터럴이라 primitive 재정의로 따라오지 않는다.
+  // styles.css 안에서 여전히 광범위하게 쓰인다(실측: --color-primary-600 40회,
+  // --color-text-main 29회) → 반드시 별도 override.
+  --color-background: 255 255 255; // axe --bg-elevated (light)
+  --color-background-alt: 247 247 246; // axe --bg-base  #f7f7f6
+  --color-background-alt2: 130 31 59; // axe --brand-claret #821f3b
+  --color-background-alt3: 41 41 41; // axe dark gray-3 #292929
+  --color-background-alt4: 24 24 24; // axe dark gray-1 #181818
+
+  --color-primary-100: 231 240 245; // axe --info-soft   #e7f0f5
+  --color-primary-300: 138 138 134; // axe light gray-9  #8a8a86
+  --color-primary-600: 16 74 112; // axe --accent       #104a70
+  --color-primary-700: 12 60 91; // axe --accent-hover  #0c3c5b
+
+  --color-secondary-100: 239 239 238; // axe light gray-3  #efefee
+  --color-secondary-300: 184 184 180; // axe light gray-8  #b8b8b4
+  --color-secondary-500: 138 138 134; // axe light gray-9  #8a8a86
+  --color-secondary-600: 104 104 101; // axe light gray-10 #686865
+  --color-secondary-700: 75 75 72; // axe light gray-11 #4b4b48
+
+  --color-info-100: 231 240 245;
+  --color-info-600: 16 74 112;
+  --color-info-700: 12 60 91;
+  --color-warning-100: 244 233 225; // axe --warning-soft #f4e9e1
+  --color-warning-600: 155 86 46; // axe --warning      #9b562e
+  --color-warning-700: 127 69 38;
+  --color-danger-100: 251 231 226; // axe --danger-soft  #fbe7e2
+  --color-danger-600: 196 50 31; // axe --danger       #c4321f
+  --color-danger-700: 156 40 24;
+  --color-success-100: 229 241 237; // axe --success-soft #e5f1ed
+  --color-success-600: 0 82 63; // axe --success      #00523f
+  --color-success-700: 4 67 52;
+  --color-notification-100: 253 243 246;
+  --color-notification-600: 130 31 59; // axe --brand-claret
+
+  --color-text-main: 32 32 30; // axe --text-primary   #20201e
+  --color-text-muted: 104 104 101; // axe --text-tertiary  #686865
+  --color-text-code: 130 31 59; // axe --brand-claret
+  --color-hover-default: rgb(32 32 30 / 0.06); // 중립 잉크 hover
+  --color-marketing-logo: 32 32 30;
+  --color-bw-blue: 130 31 59; // Bitwarden 파랑 → AXE claret
+  --color-shadow: 32 32 30; // axe elevation ink
+
+  --color-illustration-outline: 32 32 30;
+  --color-illustration-bg-primary: 249 225 232; // claret-100
+  --color-illustration-bg-secondary: 242 195 208; // claret-200
+  --color-illustration-tertiary: 234 141 86; // axe warning (dark arm)
+  --color-illustration-logo: 130 31 59; // axe --brand-claret
+
+  // ---- semantic 교정 ----
+  // 본문 텍스트: 기본값 gray-600(#686865 = @axe/ui text-tertiary)은 본문
+  // 자리엔 얕다. @axe/ui --text-secondary(gray-11 #4b4b48)로 올린다.
+  // 흰 배경 대비 7.6:1 — 대비 개선이라 review-lock 의 design aspect 가
+  // 아니라 a11y 방향의 교정이다.
+  --color-fg-body: var(--color-gray-700);
+
+  // Primary CTA: 웹볼트 라이트는 primary 버튼을 brand 가 아니라 중립 잉크로
+  // 칠한다(bg-brand → gray-700). @axe/ui --cta 는 gray-12 급 near-black 이라
+  // 한 단계 더 어둡게. strong/stronger 의 "진해지는" 방향은 유지.
+  --color-bg-brand: var(--color-gray-900); // axe --cta
+  --color-bg-brand-strong: var(--color-gray-950);
+  --color-bg-brand-stronger: var(--color-black);
+
+  // 포커스 링: 웹볼트 기본은 순검정. @axe/ui 는 :focus-visible 에 accent
+  // 블루를 쓴다. #104a70 on #ffffff = 8.6:1 로 3:1 요건 충분.
+  --color-border-focus: var(--color-teal-700);
+}
+
+// ---------------------------------------------------------------------------
+// 3. 다크 테마
+// ---------------------------------------------------------------------------
+html:root.theme_dark {
+  --color-background: 32 32 32; // axe dark gray-2 #202020
+  --color-background-alt: 24 24 24; // axe dark gray-1 #181818
+  --color-background-alt2: 41 41 41; // axe dark gray-3 #292929
+  --color-background-alt3: 41 41 41;
+  --color-background-alt4: 24 24 24;
+
+  --color-primary-100: 33 55 70; // axe --info-soft (dark) #213746
+  --color-primary-300: 16 74 112; // axe --palette-blue (light arm)
+  --color-primary-600: 90 165 210; // axe --accent (dark)  #5aa5d2
+  --color-primary-700: 130 188 224; // axe --accent-hover (dark) #82bce0
+
+  --color-secondary-100: 41 41 41; // axe dark gray-3  #292929
+  --color-secondary-300: 87 87 87; // axe dark gray-8  #575757
+  --color-secondary-500: 115 115 115; // axe dark gray-9  #737373
+  --color-secondary-600: 151 151 151; // axe dark gray-10 #979797
+  --color-secondary-700: 181 181 181; // axe dark gray-11 #b5b5b5
+
+  --color-info-100: 33 55 70;
+  --color-info-600: 90 165 210;
+  --color-info-700: 169 201 222;
+  --color-warning-100: 70 51 41; // axe --warning-soft (dark) #463329
+  --color-warning-600: 234 141 86; // axe --warning (dark)     #ea8d56
+  --color-warning-700: 238 201 168;
+  --color-danger-100: 58 32 25;
+  --color-danger-600: 242 106 85; // axe --danger (dark)      #f26a55
+  --color-danger-700: 244 179 164;
+  --color-success-100: 32 59 52; // axe --success-soft (dark) #203b34
+  --color-success-600: 93 173 149; // axe --success (dark)     #5dad95
+  --color-success-700: 163 209 195;
+  --color-notification-100: 79 18 36; // claret-900
+  --color-notification-600: 210 131 154; // axe --brand-claret (dark)
+
+  --color-text-main: 242 242 242; // axe dark --text-primary  #f2f2f2
+  --color-text-muted: 151 151 151; // axe dark --text-tertiary #979797
+  --color-text-contrast: 24 24 24;
+  --color-text-code: 210 131 154; // axe --brand-claret (dark)
+  --color-hover-default: rgb(255 255 255 / 0.07);
+  --color-bw-blue: 210 131 154;
+  --tw-ring-offset-color: #202020; // axe dark --bg-subtle
+
+  --color-illustration-outline: 210 131 154;
+  --color-illustration-bg-primary: 107 25 48; // claret-800
+  --color-illustration-bg-secondary: 79 18 36; // claret-900
+  --color-illustration-bg-tertiary: 41 41 41;
+  --color-illustration-tertiary: 234 141 86;
+
+  // 포커스 링 — 다크는 accent 의 다크 arm. #5aa5d2 on #202020 = 7.4:1.
+  --color-border-focus: var(--color-teal-400);
+}
+
+// ---------------------------------------------------------------------------
+// 4. 라운딩 — @axe/ui radius 스케일 정렬
+// ---------------------------------------------------------------------------
+// 웹볼트에는 radius 용 CSS 변수가 없다(실측). 유일한 레버가 Tailwind 유틸
+// 클래스라 예외적으로 유틸을 직접 친다. 스케일은 대부분 이미 겹친다 —
+//   tw-rounded 4px = axe --radius-sm ✓ / tw-rounded-md 6px = --radius-md ✓
+//   tw-rounded-3xl 24px = --radius-2xl ✓ / tw-rounded-full ✓
+// 실제 차이는 lg(8→10) · xl(12→16) · 2xl(16→24) 세 단뿐이라 그 셋과 그
+// 방향성 변형만 건드린다.
+//
+// 함정 2개:
+//   (a) styles.css 가 나중에 로드되므로 `html ` 접두로 (0,1,1) 을 만들어
+//       (0,1,0) 유틸을 이긴다.
+//   (b) `tw-rounded-t-none` 같은 방향 변형은 평면 유틸과 **조합**된다.
+//       내 블록 안에서 Tailwind 와 동일한 순서(평면 → 방향 → none)로 다시
+//       선언해야 조합이 깨지지 않는다. 순서 바꾸지 말 것.
+html .tw-rounded-lg { border-radius: 10px; } // axe --radius-lg
+html .tw-rounded-xl { border-radius: 16px; } // axe --radius-xl
+html .tw-rounded-2xl { border-radius: 24px; } // axe --radius-2xl
+
+html .tw-rounded-t-xl {
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+}
+html .tw-rounded-b-xl {
+  border-bottom-right-radius: 16px;
+  border-bottom-left-radius: 16px;
+}
+html .tw-rounded-tl-2xl { border-top-left-radius: 24px; }
+
+// 반드시 마지막 — 위 평면/방향 규칙보다 뒤에 와야 조합 시 이긴다.
+html .tw-rounded-t-none {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+// ---------------------------------------------------------------------------
+// 5. Tier 2 (우측 도킹) — 의도적 미적용
+// ---------------------------------------------------------------------------
+// 항목 상세 모달을 우측 전체높이 패널로 도킹하는 건 이번 배포에서 **뺐다**.
+// 근거 (전부 번들/스타일시트 실측):
+//   1. 브리핑의 셀렉터 `vault-item-dialog` 는 실재하지 않는다. 실제 Angular
+//      셀렉터는 `app-vault-item-dialog` (main.js: selectors:[["app-vault-item-
+//      dialog"]]). 즉 DOM 가정이 실렌더로 검증된 적이 없다는 신호.
+//   2. 모달은 Angular CDK GlobalPositionStrategy 로 뜬다. 전략이
+//      `.cdk-global-overlay-wrapper` 의 justify/align 과 `.cdk-overlay-pane`
+//      의 position/margin/max-width 를 **인라인 스타일**로 쓴다 → 도킹하려면
+//      전부 `!important` 로 덮어야 한다.
+//   3. 다이얼로그 컨테이너가 `tw-overflow-y-auto` + `tw-max-h-screen` +
+//      `tw-self-center` 로, 헤더/푸터가 고정된 flex-column 이 아니라 **통짜
+//      스크롤**이다. 높이/정렬을 강제로 바꾸면 저장 버튼이 뷰포트 밖에
+//      갇힐 수 있다 — 비밀번호 볼트에서 이건 미관이 아니라 기능 사고다.
+//   4. 이 세션은 로그인 뒤 실화면을 볼 수 없어(시각 검증은 상위 세션 몫)
+//      위 위험을 배포 전에 반증할 방법이 없다.
+// → 지침대로 "깨진 도킹보다 무도킹". 후속 작업 시 로그인 상태에서
+//   app-vault-item-dialog 의 실 DOM 을 열어 3번(내부 스크롤 구조)부터
+//   확인할 것.
