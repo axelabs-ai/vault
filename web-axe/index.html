@@ -2,6 +2,12 @@
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
+    <!-- 2선 CSP — 1선은 엣지 HTTP 헤더(DEPLOY.md 5절). meta 는 frame-ancestors 를
+         지원하지 않으므로 그 항목만 여기 없다. 정책 본문은 헤더와 동일하게 유지할 것. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="robots" content="noindex, nofollow" />
     <meta name="referrer" content="no-referrer" />
