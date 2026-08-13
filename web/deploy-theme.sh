@@ -25,6 +25,11 @@
 #
 #   사용:  ./deploy-theme.sh            배포 + 검증
 #          ./deploy-theme.sh --verify   배포 없이 현재 상태만 검증
+#
+#   종료코드: 0 = 성공(origin·CDN 둘 다 이번 rev)
+#             1 = 실패(전송·재시작·origin rev·헬스체크)
+#             3 = 부분성공 — origin 은 반영됐으나 공개 CDN 이 여전히 구버전.
+#                 실사용자는 아직 구 CSS 를 받는다 → 퍼지 후 --verify 재확인.
 # ============================================================================
 set -euo pipefail
 
@@ -114,11 +119,16 @@ PY
 
   # 공개 캐시 경로(퍼지 반영)도 확인 — 실사용자가 받는 응답. 여기도 rev 정확
   # 일치를 요구해야 퍼지 실패가 성공으로 오보되지 않는다.
-  css_marker="$(curl -fsS "$CSS_URL" 2>/dev/null | grep -cE -- "$rev_re" || true)"
-  if [ "${css_marker:-0}" -ge 1 ]; then
+  local cdn_stale=1
+  for n in $(seq 1 3); do
+    css_marker="$(curl -fsS "$CSS_URL" 2>/dev/null | grep -cE -- "$rev_re" || true)"
+    if [ "${css_marker:-0}" -ge 1 ]; then cdn_stale=0; break; fi
+    # `[ … ] && sleep` 는 마지막 반복에서 1 을 남겨 `set -e` 가 여기서 스크립트를
+    # 죽인다(아래 exit 3 에 도달 못 함). if 로 둘 것.
+    if [ "$n" -lt 3 ]; then sleep 10; fi
+  done
+  if [ "$cdn_stale" = 0 ]; then
     ok "rev ${REV} — CDN 캐시 경로도 반영됨"
-  else
-    printf '\033[1;33m  warn\033[0m CDN 이 아직 다른 rev 를 서빙 (max-age=86400). `axe cf purge %s` 재시도 필요.\n' "$CSS_URL"
   fi
 
   code="$(curl -fsS -o /dev/null -w '%{http_code}' "${BASE_URL}/alive" || echo 000)"
@@ -127,6 +137,15 @@ PY
   # 로그인 화면은 SPA 라우트(#/login)라 서버 응답은 루트 index.html 이다.
   code="$(curl -fsS -o /dev/null -w '%{http_code}' "${BASE_URL}/" || echo 000)"
   [ "$code" = 200 ] && ok "로그인 페이지(SPA 루트) ${code}" || fail "로그인 페이지 ${code}"
+
+  # 부분성공은 성공이 아니다. origin 은 새 rev 인데 실사용자는 아직 구버전을
+  # 받는 상태 — 경고만 찍고 0 으로 끝내면 CI·운영자가 완료로 읽는다.
+  if [ "$cdn_stale" != 0 ]; then
+    printf '\033[1;31m FAIL\033[0m 부분성공(exit 3): origin 은 rev %s 인데 공개 CDN 은 3회(20초) 재시도 후에도 구버전.\n' "$REV" >&2
+    printf '        배포 완료 아님 — 캐시 퍼지 후 재검증할 것: axe cf purge %s && %s --verify\n' \
+           "$CSS_URL" "${BASH_SOURCE[0]}" >&2
+    exit 3
+  fi
 }
 
 if [ "${1:-}" = "--verify" ]; then verify; exit 0; fi

@@ -1,4 +1,4 @@
-From 8555cc9492dc346eb978f8ba77323a8226491ca0 Mon Sep 17 00:00:00 2001
+From aa638e141ba96e32a5e944b13ef793bad198352f Mon Sep 17 00:00:00 2001
 From: AXE Labs AI <ai@axellc.com>
 Date: Mon, 10 Aug 2026 09:04:48 +0900
 Subject: [PATCH] =?UTF-8?q?axe:=20SSO=5FALLOWED=5FTENANT=5FIDS=20=E2=80=94?=
@@ -46,11 +46,28 @@ CONFIG 를 읽지 않는 순수 함수 `issuer_matches(authority, allowed, iss)`
 `with` 는 이제 인자 전달뿐 — 판정 규칙을 한 줄도 다시 쓰지 않는다.
 
 동작 불변(순수 리팩터링). 테스트 4건 그대로 통과.
+
+2026-08-13 최종 게이트 반영 — finding `unchecked-discovery-not-limited-or-validated`(v2):
+
+`split_multi_tenant_authority` 가 `rfind("/organizations"|"/common")` substring 스캔
+이었다. 그래서 `https://keycloak.example.com/realms/common/v2.0`(아예 다른 IdP)와
+`https://login.microsoftonline.com/commonality/v2.0`(위장 테넌트명)에도 Some 을 주고,
+호출자는 그 prefix/suffix 를 authoritative 로 취급했다.
+
+URL 파싱 기반 정형 검증으로 교체: scheme=https · host == login.microsoftonline.com ·
+port 없음 · query/fragment 없음 · path 가 정확히 `/organizations/v2.0` 또는
+`/common/v2.0`. prefix/suffix 는 그래서 상수가 된다. 소버린 클라우드
+(`login.microsoftonline.us` 등)는 쓰는 테넌트가 없어 의도적으로 뺐다 — 필요해지면
+그때 추가한다고 주석에 남겼다(테스트 못 하는 호스트를 미리 넓히지 않는다).
+
+이 함수는 `issuer_is_accepted` 와 sso_client 의 우회 게이트가 함께 쓰므로 두 경로가
+같이 좁아진다. 회귀 테스트 2건 추가(외부 호스트·lookalike·경로연장·호스트접미사 /
+정형 split 과 query·fragment·http·포트 거부). 기존 4건 그대로 통과.
 ---
  src/config.rs     |   2 +
- src/sso.rs        | 117 +++++++++++++++++++++++++++++++++++++++++++++-
- src/sso_client.rs |  17 +++++++
- 3 files changed, 135 insertions(+), 1 deletion(-)
+ src/sso.rs        | 177 +++++++++++++++++++++++++++++++++++++++++++++-
+ src/sso_client.rs |  17 +++++
+ 3 files changed, 195 insertions(+), 1 deletion(-)
 
 diff --git a/src/config.rs b/src/config.rs
 index 7f372736..b9fd50f7 100644
@@ -66,10 +83,10 @@ index 7f372736..b9fd50f7 100644
          sso_callback_path:              String, true,  generated, |c| generate_sso_callback_path(&c.domain);
          /// Optional SSO master password policy |> Ex format: '{"enforceOnLogin":false,"minComplexity":3,"minLength":12,"requireLower":false,"requireNumbers":false,"requireSpecial":false,"requireUpper":false}'
 diff --git a/src/sso.rs b/src/sso.rs
-index 4a4398e6..8a08e763 100644
+index 4a4398e6..ff9eb7b5 100644
 --- a/src/sso.rs
 +++ b/src/sso.rs
-@@ -157,6 +157,74 @@ impl BasicTokenClaims {
+@@ -157,6 +157,96 @@ impl BasicTokenClaims {
      }
  }
  
@@ -128,23 +145,45 @@ index 4a4398e6..8a08e763 100644
 +    !tenant.is_empty() && !tenant.contains('/') && allowed.contains(&tenant.to_lowercase())
 +}
 +
-+/// Split `https://host/{organizations|common}/v2.0` into the parts around the tenant
-+/// segment. `None` when the authority is not a multi-tenant endpoint.
++/// Entra public cloud. The sovereign clouds (`login.microsoftonline.us`,
++/// `login.partner.microsoftonline.cn`) are deliberately absent: no tenant here uses one, and
++/// listing hosts we cannot test only widens the bypass for nobody. Add one when a tenant
++/// actually needs it.
++const ENTRA_HOST: &str = "login.microsoftonline.com";
++/// The endpoints whose discovery document carries a templated issuer.
++const ENTRA_MULTI_TENANT_SEGMENTS: [&str; 2] = ["organizations", "common"];
++const ENTRA_V2_SUFFIX: &str = "/v2.0";
++
++/// Split a **recognized** Entra multi-tenant authority into the parts around the tenant
++/// segment. `None` for everything else.
++///
++/// Structural, not substring. A `rfind("/common")` scan also matches
++/// `https://keycloak.example.com/realms/common/v2.0` — a different identity provider
++/// entirely — and `https://login.microsoftonline.com/commonality/v2.0`, a look-alike tenant
++/// name. Both would hand the caller a prefix/suffix pair it then treats as authoritative.
++/// So: parse the URL and require every part to be what we expect.
 +fn split_multi_tenant_authority(authority: &str) -> Option<(String, String)> {
-+    for marker in ["/organizations", "/common"] {
-+        if let Some(idx) = authority.rfind(marker) {
-+            let prefix = format!("{}/", &authority[..idx]);
-+            let suffix = authority[idx + marker.len()..].to_string();
-+            return Some((prefix, suffix));
-+        }
++    let url = Url::parse(authority).ok()?;
++    if url.scheme() != "https"
++        || url.host_str() != Some(ENTRA_HOST)
++        || url.port().is_some()
++        || url.query().is_some()
++        || url.fragment().is_some()
++    {
++        return None;
 +    }
-+    None
++    // Exact path, not a prefix: `/commonality/v2.0` and `/common/v2.0/extra` are both out.
++    let path = url.path();
++    if !ENTRA_MULTI_TENANT_SEGMENTS.iter().any(|segment| path == format!("/{segment}{ENTRA_V2_SUFFIX}")) {
++        return None;
++    }
++    Some((format!("https://{ENTRA_HOST}/"), ENTRA_V2_SUFFIX.to_owned()))
 +}
 +
  fn decode_token_claims(token_name: &str, token: &str) -> ApiResult<BasicTokenClaims> {
      // We need to manually validate this token, since `insecure_decode` does not do this
      match jsonwebtoken::dangerous::insecure_decode::<BasicTokenClaimsValidation>(token) {
-@@ -167,7 +235,7 @@ fn decode_token_claims(token_name: &str, token: &str) -> ApiResult<BasicTokenCla
+@@ -167,7 +257,7 @@ fn decode_token_claims(token_name: &str, token: &str) -> ApiResult<BasicTokenCla
              if validate_claim.exp < now - 60 {
                  err_silent!(format!("Expired Signature for base token claim from {token_name}"))
              }
@@ -153,7 +192,7 @@ index 4a4398e6..8a08e763 100644
                  err_silent!(format!("Invalid Issuer for base token claim from {token_name}"))
              }
  
-@@ -929,3 +997,50 @@ mod tests {
+@@ -929,3 +1019,88 @@ mod tests {
          );
      }
  }
@@ -202,6 +241,44 @@ index 4a4398e6..8a08e763 100644
 +        assert!(!with(ORGS, "evil", "https://evil.example.com/evil/v2.0"));
 +        // 경로 주입으로 접미사를 맞추려는 시도.
 +        assert!(!with(ORGS, "a", "https://login.microsoftonline.com/a/b/v2.0"));
++    }
++
++    #[test]
++    fn lookalike_authorities_are_not_multi_tenant() {
++        // authority 자체가 위장인 경우 — substring 스캔이면 전부 Some 을 줬다.
++        // 타 IdP 의 realm 이름이 우연히(또는 고의로) `common` 인 경우.
++        const KEYCLOAK: &str = "https://keycloak.example.com/realms/common/v2.0";
++        // 진짜 Entra 호스트지만 테넌트 이름이 `common…` 으로 시작하는 경우.
++        const LOOKALIKE: &str = "https://login.microsoftonline.com/commonality/v2.0";
++        // 경로가 더 붙은 경우.
++        const DEEPER: &str = "https://login.microsoftonline.com/common/v2.0/extra";
++        // 호스트를 접미사로 삼아 붙인 경우.
++        const EVIL_HOST: &str = "https://login.microsoftonline.com.evil.example/common/v2.0";
++
++        for authority in [KEYCLOAK, LOOKALIKE, DEEPER, EVIL_HOST] {
++            assert_eq!(split_multi_tenant_authority(authority), None, "{authority} 는 멀티테넌트가 아니다");
++            // 그러므로 그 authority 로는 어떤 iss 도 치환 통과할 수 없다 — 정확 일치만 남는다.
++            assert!(!with(authority, "381cc823-2bb2-43a7-9a27-68ea3afacdff", RC));
++            assert!(with(authority, "381cc823-2bb2-43a7-9a27-68ea3afacdff", authority));
++        }
++    }
++
++    #[test]
++    fn recognized_authority_splits_into_fixed_parts() {
++        assert_eq!(
++            split_multi_tenant_authority(ORGS),
++            Some(("https://login.microsoftonline.com/".to_owned(), "/v2.0".to_owned()))
++        );
++        assert_eq!(
++            split_multi_tenant_authority("https://login.microsoftonline.com/common/v2.0"),
++            split_multi_tenant_authority(ORGS)
++        );
++        // query·fragment 가 붙으면 우리가 아는 엔드포인트가 아니다.
++        assert_eq!(split_multi_tenant_authority(&format!("{ORGS}?x=1")), None);
++        assert_eq!(split_multi_tenant_authority(&format!("{ORGS}#x")), None);
++        // http 다운그레이드·명시 포트도 거부.
++        assert_eq!(split_multi_tenant_authority("http://login.microsoftonline.com/common/v2.0"), None);
++        assert_eq!(split_multi_tenant_authority("https://login.microsoftonline.com:8443/common/v2.0"), None);
 +    }
 +}
 diff --git a/src/sso_client.rs b/src/sso_client.rs
