@@ -79,10 +79,28 @@ export async function masterPasswordAuthHash(masterKey: Uint8Array, password: st
 /** 서버가 2FA 를 요구했다. 화면이 코드 입력란을 띄우고 같은 자격증명으로 재시도한다. */
 export class TwoFactorRequiredError extends Error {
   providers: number[];
-  constructor(providers: number[]) {
+  /** 서버가 함께 준 설명. 코드가 **거절**된 경우의 사유가 여기 담긴다. */
+  detail?: string;
+  constructor(providers: number[], detail?: string) {
     super("2단계 인증 코드가 필요하다");
     this.providers = providers;
+    this.detail = detail;
   }
+}
+
+/**
+ * 제출한 2FA 코드가 거절됐는가.
+ *
+ * ⚠ 서버는 **최초 요구**와 **코드 거절**을 같은 모양으로 답한다(둘 다 `TwoFactorProviders`
+ * 를 든 400). 그래서 응답만 보면 구별할 수 없고, "우리가 코드를 보냈는가"라는 문맥으로만
+ * 갈린다. 이걸 놓치면 틀린 코드를 넣었을 때 폼이 아무 말 없이 되돌아온다 —
+ * 사용자는 무엇이 잘못됐는지 알 방법이 없다.
+ *
+ * 최초 요구면 null(에러 아님), 거절이면 화면에 띄울 문구를 준다.
+ */
+export function twoFactorRejection(err: TwoFactorRequiredError, submittedCode: string | undefined): string | null {
+  if (!submittedCode?.trim()) return null;
+  return err.detail ?? "인증 코드가 올바르지 않습니다. 앱에 표시된 새 코드로 다시 시도하세요.";
 }
 
 /** Bitwarden TwoFactorProviderType.Authenticator — P1 이 지원하는 유일한 방식. */
@@ -156,7 +174,8 @@ export async function tokenGrant(body: URLSearchParams): Promise<{ json: Record<
   } catch (e) {
     if (e instanceof HttpError) {
       const providers = twoFactorProviders(e.body);
-      if (providers?.length) throw new TwoFactorRequiredError(providers);
+      // e.message 는 이미 서버 바디에서 뽑은 설명이다 (api.ts serverMessage).
+      if (providers?.length) throw new TwoFactorRequiredError(providers, e.message);
     }
     throw e;
   }

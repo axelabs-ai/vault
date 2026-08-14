@@ -134,8 +134,8 @@ axe tunnel add-ingress vault.axelabs.ai '^/(|index\.html|assets/.*)$' http://web
 axe tunnel add-ingress vault.axelabs.ai '^/(favicon\.(ico|svg)|apple-touch-icon\.png)$' http://web-axe:80
 ```
 
-세 번 다 **INSERT-only** 다. 기존 규칙을 고치거나 지우지 않았다 — 그래서 각각 그 한 줄만
-빼면 정확히 이전 상태로 돌아간다. `add-ingress` 는 같은 호스트의 bare 규칙 **앞**에
+네 번 다 **INSERT-only** 다 (①~③ 적용됨, ④ 미적용). 기존 규칙을 고치거나 지우지 않는다 —
+그래서 각각 그 한 줄만 빼면 정확히 이전 상태로 돌아간다. `add-ingress` 는 같은 호스트의 bare 규칙 **앞**에
 자동 삽입하므로 순서를 손으로 계산할 필요도 없다.
 
 **cloudflared 재기동은 불필요하다** (설계에는 필요하다고 적혀 있었다). 원격 관리형이라 엣지가

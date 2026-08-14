@@ -102,6 +102,52 @@ test("SSO 콜백이 아니면 핸드셰이크를 지우지 않는다 (진행 중
   assert.equal(sessionStorage.getItem("axe-vault.sso-verifier"), "V1");
 });
 
+// ------------------------------------------------- 도착 흐름 수명 (회귀: 로그아웃 고착)
+
+/** App 이 하는 일 그대로 — phase 가 바뀔 때마다 한 걸음씩 밟는다. */
+function walk(handoff, phases) {
+  let flow = sso.ssoFlowStart(handoff);
+  for (const p of phases) flow = sso.ssoFlowStep(flow, p);
+  return flow;
+}
+
+const HANDOFF = { code: "C", verifier: "V" };
+
+test("회귀: SSO 완료 → 로그아웃 → 로그인 화면 (빈 SSO 화면에 고착되지 않는다)", () => {
+  // login(교환 중) → locked(인증 완료, 잠금해제 대기) → login(로그아웃)
+  const flow = walk(HANDOFF, ["login", "locked", "login"]);
+  assert.equal(flow.handoff, null, "핸드오프가 살아 있으면 이미 쓴 code 로 SSO 화면이 되살아난다");
+  assert.equal(flow.authenticated, false);
+});
+
+test("교환이 끝나기 전(phase 계속 login)에는 핸드오프가 살아 있다", () => {
+  // 2FA 코드를 받는 동안 phase 는 "login" 에 머문다 — 여기서 폐기하면 흐름이 끊긴다.
+  const flow = walk(HANDOFF, ["login", "login", "login"]);
+  assert.deepEqual(flow.handoff, HANDOFF);
+  assert.equal(flow.authenticated, false);
+});
+
+test("금고가 열리면 도착 흐름은 끝난다 — 이후 유휴 잠금이 SSO 화면을 되살리지 않는다", () => {
+  const opened = walk(HANDOFF, ["login", "locked", "unlocked"]);
+  assert.equal(opened.handoff, null);
+  // 그 뒤 유휴 잠금으로 다시 locked 가 돼도 되살아나지 않는다.
+  assert.equal(sso.ssoFlowStep(opened, "locked").handoff, null);
+});
+
+test("ssoFlowStep 은 멱등이다 (StrictMode 이중 렌더 안전)", () => {
+  for (const phase of ["login", "locked", "unlocked"]) {
+    const once = walk(HANDOFF, ["locked", phase]);
+    const twice = sso.ssoFlowStep(once, phase);
+    assert.deepEqual(twice, once, `phase=${phase}`);
+  }
+});
+
+test("SSO 없이 부팅하면(handoff null) 어떤 phase 에서도 SSO 화면이 뜨지 않는다", () => {
+  for (const phase of ["login", "locked", "unlocked"]) {
+    assert.equal(walk(null, [phase]).handoff, null);
+  }
+});
+
 // ---------------------------------------------------------------- PKCE
 
 test("PKCE: challenge = base64url(SHA-256(verifier)), 패딩 없음", async () => {
@@ -206,6 +252,43 @@ test("서버가 2FA 를 요구하면 TwoFactorRequiredError 로 정규화된다 
     await assert.rejects(
       () => sso.exchangeSsoCode("CODE", "VERIFIER"),
       (e) => e instanceof auth.TwoFactorRequiredError && e.providers.includes(0),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("제출한 2FA 코드가 거절되면 침묵하지 않는다 (서버 설명 보존)", () => {
+  // 서버는 최초 요구와 코드 거절을 같은 모양으로 답한다 — 제출 여부로만 갈린다.
+  const err = new auth.TwoFactorRequiredError([0], "Two-step token is invalid. Try again.");
+
+  // 최초 요구: 아직 아무것도 제출하지 않았다 → 에러가 아니라 챌린지다.
+  assert.equal(auth.twoFactorRejection(err, undefined), null);
+  assert.equal(auth.twoFactorRejection(err, "   "), null);
+
+  // 제출 후 같은 요구 = 거절. 서버 설명을 그대로 보여 준다.
+  assert.equal(auth.twoFactorRejection(err, "123456"), "Two-step token is invalid. Try again.");
+
+  // 서버가 설명을 안 줬어도 사용자는 무슨 일이 났는지 알아야 한다.
+  const bare = new auth.TwoFactorRequiredError([0]);
+  assert.match(auth.twoFactorRejection(bare, "123456"), /인증 코드/);
+});
+
+test("2FA 요구 에러는 서버 설명을 싣고 온다", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ TwoFactorProviders: [0], error_description: "Two-step token is invalid." }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  try {
+    await assert.rejects(
+      () => sso.exchangeSsoCode("CODE", "VERIFIER", "000000"),
+      (e) => {
+        assert.equal(e.detail, "Two-step token is invalid.");
+        assert.equal(auth.twoFactorRejection(e, "000000"), "Two-step token is invalid.");
+        return true;
+      },
     );
   } finally {
     globalThis.fetch = originalFetch;

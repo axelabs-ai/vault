@@ -9,7 +9,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { describe } from "../lib/api.ts";
 import { CLASSIC_ORIGIN } from "../lib/classic.ts";
-import { PROVIDER_LABELS, TwoFactorRequiredError, PROVIDER_AUTHENTICATOR } from "../lib/auth.ts";
+import { PROVIDER_LABELS, TwoFactorRequiredError, PROVIDER_AUTHENTICATOR, twoFactorRejection } from "../lib/auth.ts";
 import { beginSso, describeSsoFailure, type SsoHandoff } from "../lib/sso.ts";
 import { SDK_VERSION } from "../sdk.ts";
 import { ServiceSwitcher } from "./ServiceSwitcher.tsx";
@@ -145,12 +145,14 @@ export function LoginScreen({ onSignIn }: LoginScreenProps) {
     e.preventDefault();
     setBusy(true);
     setError(null);
+    const submitted = providers ? code : undefined;
     try {
-      await onSignIn(email, password, providers ? code : undefined);
+      await onSignIn(email, password, submitted);
     } catch (err) {
       if (err instanceof TwoFactorRequiredError) {
         setProviders(err.providers);
-        setError(null);
+        // 코드를 제출했는데 같은 요구가 돌아왔다 = 거절이다. 침묵하면 안 된다.
+        setError(twoFactorRejection(err, submitted));
       } else {
         setError(describe(err));
       }
@@ -397,7 +399,9 @@ export function SsoScreen({ handoff, email, authenticated, onComplete, onUnlock,
       await onComplete(handoff.code, handoff.verifier, twoFactorCode);
     } catch (err) {
       if (err instanceof TwoFactorRequiredError) {
+        // 프로바이더 선택은 유지한다 — 코드가 거절돼도 폼은 그 자리에 남아야 한다.
         setProviders(err.providers);
+        setError(twoFactorRejection(err, twoFactorCode));
       } else {
         setError(describeSsoFailure(err) ?? describe(err));
       }
@@ -431,6 +435,8 @@ export function SsoScreen({ handoff, email, authenticated, onComplete, onUnlock,
   }
 
   const codeSupported = !providers || providers.includes(PROVIDER_AUTHENTICATOR);
+  /** 코드 폼이 떠 있다 = 사용자가 그 자리에서 다시 시도할 수 있다. */
+  const retryable = !!error && !!providers && codeSupported;
 
   return (
     <AuthShell
@@ -489,11 +495,19 @@ export function SsoScreen({ handoff, email, authenticated, onComplete, onUnlock,
           />
         )}
 
-        {error && <StatusBanner tone="error" title="SSO 로그인 실패" description={error} />}
+        {error && (
+          <StatusBanner
+            tone="error"
+            title={retryable ? "인증 코드가 거절됐습니다" : "SSO 로그인 실패"}
+            description={error}
+          />
+        )}
 
         {busy && !providers && <StatusBanner tone="info" title="인증 코드를 교환하는 중…" />}
 
-        {(error || (providers && !codeSupported)) && (
+        {/* 코드를 다시 넣으면 되는 상황에서는 되돌아가기를 권하지 않는다 — 로그인 화면으로
+            나가면 SSO 를 처음부터 다시 해야 한다. */}
+        {!retryable && (error || (providers && !codeSupported)) && (
           <a className="axe-btn axe-btn--secondary axe-btn--lg axe-pattern-auth__email-action" href="/">
             로그인 화면으로 돌아가기
           </a>

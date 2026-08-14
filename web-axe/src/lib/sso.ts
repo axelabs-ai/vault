@@ -175,6 +175,43 @@ export function ssoRoute(hash: string, stored: { state: string | null; verifier:
   return { kind: "forward", target: forward };
 }
 
+/**
+ * 부팅 시 받은 SSO 핸드오프의 **수명**.
+ *
+ * 핸드오프는 1회용이다: 그 안의 `code` 는 교환하는 순간 소비된다. 그런데 SSO 화면은
+ * phase 가 "login"·"locked" 인 동안 떠 있어야 하므로(교환 중 → 잠금해제 대기), phase 만
+ * 보고는 "아직 진행 중"과 "끝났는데 다시 login 으로 돌아왔다"를 구별할 수 없다.
+ *
+ * ⚠ 이 구별을 놓치면 실제로 고착된다: SSO 로 인증한 뒤 잠금해제 화면에서 로그아웃하면
+ * phase 가 "login" 으로 돌아오는데, 핸드오프가 살아 있으면 **이미 쓴 code 를 든 SSO 화면이
+ * 되살아나** 아무 일도 일어나지 않는 빈 화면이 된다 (교환은 마운트 1회라 재실행되지도 않는다).
+ *
+ * 그래서 폐기를 로그아웃 핸들러에 매달지 않고 phase 에서 **파생**한다 — 로그아웃 경로가
+ * 늘어나도(잠금해제 화면·금고 화면·향후 무엇이든) 규칙이 한 곳에 남는다.
+ *
+ * `ssoFlowStep` 은 같은 phase 로 여러 번 불러도 결과가 같다(멱등) — StrictMode 의 이중
+ * 렌더에서도 안전해야 하기 때문이다.
+ */
+export interface SsoFlow {
+  handoff: SsoHandoff | null;
+  /** 교환이 성공해 phase 가 "login" 을 벗어난 적이 있는가. */
+  authenticated: boolean;
+}
+
+export const ssoFlowStart = (handoff: SsoHandoff | null): SsoFlow => ({ handoff, authenticated: false });
+
+const RETIRED: SsoFlow = { handoff: null, authenticated: false };
+
+export function ssoFlowStep(flow: SsoFlow, phase: "login" | "locked" | "unlocked"): SsoFlow {
+  if (!flow.handoff) return flow;
+  // 금고가 열렸다 — 도착 흐름은 여기서 끝난다. 이후의 유휴 잠금이 SSO 화면을 되살리지 않는다.
+  if (phase === "unlocked") return RETIRED;
+  // 인증까지 끝났고 잠금해제를 기다린다.
+  if (phase === "locked") return flow.authenticated ? flow : { ...flow, authenticated: true };
+  // phase === "login": 인증까지 갔다가 돌아왔다면 로그아웃이다.
+  return flow.authenticated ? RETIRED : flow;
+}
+
 export function clearSsoHandshake(): void {
   sessionStorage.removeItem(STATE_KEY);
   sessionStorage.removeItem(VERIFIER_KEY);
