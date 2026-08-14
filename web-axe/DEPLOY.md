@@ -321,8 +321,9 @@ docker compose -f /opt/axe/vault/docker-compose.yml up -d web-axe   # 서비스�
   "새 파일 추가 → index.html 교체" 순서가 자연스럽게 무중단이다.
 - **전개 검산은 매니페스트 해시로**: `find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum`
   을 로컬/호스트 양쪽에서 떠서 대조한다 (파일 수까지 함께).
-  현재 배포된 값 = `bf130abc…`, 104 files (`1249fa3` SSO 네이티브 빌드 — 아이콘 3개가 늘어
-  101 → 104). 이전: 루트 컷오버 `160a2a05…`/101, 그 전 `/axe/` 빌드 `1f8fe31c…`.
+  현재 배포된 값 = `241157e3…`, 104 files (`605f0c1` 전환기 레일 빌드). 이전: `1249fa3`
+  SSO 네이티브 `bf130abc…`/104 (아이콘 3개가 늘어 101 → 104), 루트 컷오버 `160a2a05…`/101,
+  그 전 `/axe/` 빌드 `1f8fe31c…`.
 - ⚠️ **이미 200 이던 경로를 새 오리진으로 옮기면 Cloudflare 엣지가 옛 응답을 물고 있다**:
   ingress 규칙이 맞아도 공개 URL 이 안 바뀐다. `?cachebust=…` 로 캐시키를 비껴가 오리진을
   먼저 분리 확인하고, `axe cf purge <url>` 로 단일 URL 만 퍼지한다. 상세 = 2절 ④ 의 함정.
@@ -338,7 +339,7 @@ docker compose -f /opt/axe/vault/docker-compose.yml up -d web-axe   # 서비스�
 - [x] `dist/index.html` 에 인라인 `<script>` 0 개
 - [x] 루트 `/` 200 + `<title>AXE Vault</title>` + 자산이 `/assets/…`
 - [x] **루트가 새 빌드** — 공개 `index.html` + 참조 자산 2개가 로컬 `dist/` 와 sha256 완전 일치
-      (`index-MflxdPX7.js` · `index-DXZzmPRn.css`)
+      (`605f0c1`: `index-Df7Tei33.js` · `index-DXZzmPRn.css`)
 - [x] **브랜드 아이콘** — `/favicon.svg`·`/apple-touch-icon.png` 이 `~/AXE/favicon-build/`
       마스터와 sha256 일치. `/favicon.ico` 는 오리진 일치, 공개 URL 은 엣지 캐시 만료 대기(2절 ④)
 - [x] CSP 등 보안 헤더 7종이 **세 경로 모두**(`/`·`/index.html`·`/assets/<파일>`)에서 실측
