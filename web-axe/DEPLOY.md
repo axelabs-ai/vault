@@ -1,11 +1,15 @@
-# web-axe 배포 (P1 — 2026-08-14 배포 완료)
+# web-axe 배포 (P1 — 2026-08-14 배포 + 루트 컷오버 완료)
 
 `B-vault-axe-frontend` P1 산출물의 배포 설계 + 실제 배포 기록.
-**LIVE: https://vault.axelabs.ai/axe/** (2026-08-14, origin/main `e9c87b5` 빌드).
 
-설계는 아래 1·4·5절이 그대로 살아 있고, 실행하면서 사실과 달랐던 두 곳(2절 ingress 관리
-방식, 3절 컨테이너 패키징)을 실측으로 교정했다. 남은 검증은 6절 "사전 확인" 의 운영자
-입회 실사용 왕복뿐이다.
+**LIVE: https://vault.axelabs.ai/ — 루트가 AXE Vault 앱이다.**
+스톡 web-vault 는 **https://vault-classic.axelabs.ai/** 로 옮겨졌다 (같은 vaultwarden
+컨테이너, 호스트명만 다르다). 구 진입점 `https://vault.axelabs.ai/axe/` 도 하위호환으로 산다.
+
+같은 날 두 번에 나눠 배포했다: 먼저 `/axe/` 서브패스로 올리고(설계 원안), 이어서 운영자
+지시로 루트 컷오버를 했다. 설계의 1·4·5절은 그대로 살아 있고, 실행하며 사실과 달랐던
+곳(2절 ingress 관리 방식, 3절 컨테이너 패키징)은 실측으로 교정했다.
+남은 검증은 6절 "사전 확인" 의 운영자 입회 실사용 왕복뿐이다.
 
 ## 1. 왜 same-origin 이어야 하는가 (선택이 아니라 제약)
 
@@ -23,34 +27,69 @@
 부수 효과로 CSP 를 최대로 조일 수 있다 — 이 앱은 **자기 오리진 밖으로 나가는 요청이 하나도 없다**
 (폰트·CSS·WASM 전부 번들, 외부 CDN 0).
 
-## 2. 라우트: `vault.axelabs.ai/axe/*`
-
-기존 스톡 web-vault(`/`, `/identity`, `/api`, `/notifications`)를 건드리지 않고 `/axe/` 프리픽스만
-새로 잡는다. 스톡 볼트는 그대로 남아 SSO·항목 편집·계정 설정 등 P1 밖의 일을 계속 맡는다
-(앱 안의 "기본 볼트 열기" 링크가 그리로 보낸다).
+## 2. 라우트: 루트가 앱, 서버 경로는 vaultwarden
 
 ```
-                    Cloudflare (vault.axelabs.ai)
-                              │
-                        cloudflared ingress
-                              │
-        ┌─────────────────────┴─────────────────────┐
-        │                                           │
-   /axe/*  →  axe-vault-web (정적)          그 외  →  기존 vaultwarden
-   (nginx/Caddy 정적 서버)                    (/, /identity, /api, /notifications)
+                 Cloudflare
+        ┌────────────┴─────────────┐
+ vault.axelabs.ai          vault-classic.axelabs.ai
+        │                          │
+  cloudflared ingress              └─→ 전부 vaultwarden (스톡 web-vault + API)
+        │
+        ├─ ^/axe(/.*)?$              → web-axe   (구 진입점, 하위호환)
+        ├─ ^/(|index\.html|assets/.*)$ → web-axe   (앱이 소유한 경로 allowlist)
+        └─ (bare, 그 외 전부)        → vaultwarden
 ```
 
-`/identity`·`/api` 는 **프리픽스 밖**이므로 앱이 `location.origin` 기준으로 그대로 친다
-(`src/lib/api.ts` 의 `identityUrl()`/`apiUrl()` 이 오리진 루트를 쓰는 이유). 앱을 서브패스에
-두어도 API 주소는 변하지 않는다.
+| 호스트 / 경로 | 도착지 | 역할 |
+|---|---|---|
+| `vault.axelabs.ai/` · `/index.html` · `/assets/*` | **web-axe** | AXE Vault 앱 |
+| `vault.axelabs.ai/axe/*` | **web-axe** | 구 진입점 하위호환 |
+| `vault.axelabs.ai` 의 **그 외 전부** | **vaultwarden** | `/api` `/identity` `/notifications` `/icons` `/attachments` `/alive` `/admin` `/css` `/vw_static` `/sso-connector.html` `/.well-known` `/app` `/images` · 루트 해시 파일(`styles.<hash>.css` 등) |
+| `vault-classic.axelabs.ai/*` | **vaultwarden** | 스톡 web-vault — 관리 콘솔·SSO 첫 가입·P1 미구현 기능 폴백 |
 
-Vite 는 `base` 를 `/axe/` 로 잡아 빌드해야 자산 경로가 맞는다:
+### ⚠️ allowlist 이지 blocklist 가 아니다 (이 배포에서 제일 중요한 결정)
+
+서버 경로를 **열거해서 vaultwarden 으로 보내는** 방식은 쓰지 않았다. 그 방식은
+**실패 방향이 위험하다** — 목록에서 빠뜨린 경로는 정적 서버로 가서 404 가 되고,
+데스크톱·CLI·확장이 조용히 죽는다. 경로 목록은 서버를 올릴 때마다 늘어날 수 있어
+"지금 다 적었다"를 보장할 방법도 없다.
+
+그래서 **뒤집었다**: 앱이 소유한 경로(`/`·`/index.html`·`/assets/*`·`/axe/*`)만 명시하고,
+**나머지 전부는 기존 bare 규칙으로 흘러 vaultwarden 이 받는다.** 우리가 미처 생각 못 한
+경로가 있어도 그건 컷오버 전과 똑같이 vaultwarden 이 처리한다 — 실패 방향이 안전하다.
+
+이게 성립하는 근거(실측 2026-08-14): 스톡 web-vault 번들은 `images/`·`app/`·`css/` 와
+루트 해시 파일만 참조하고 **`/assets/` 를 쓰지 않는다.** 즉 우리 allowlist 는 스톡
+번들과 겹치지 않는다. Vite 의 출력 디렉터리가 `assets/` 라 이 분리가 자연스럽다.
+
+검증도 이 결정에 맞췄다: 컷오버 전/후로 서버 경로 16종의 **상태코드 + 본문 sha256** 을
+떠서 완전 일치를 확인했다(6절). "열거가 맞았는지" 대신 "계약이 안 변했는지"를 본다.
+
+`/identity`·`/api` 는 allowlist 밖이라 앱이 `location.origin` 기준으로 쳐도 그대로
+vaultwarden 에 닿는다 (`src/lib/api.ts` 의 `identityUrl()`/`apiUrl()`). same-origin 이므로
+CORS 는 여전히 발생하지 않는다.
+
+Vite `base` 는 이제 기본값(`/`)이라 빌드 플래그가 필요 없다:
 
 ```bash
-npm run build -- --base=/axe/
+npm run build          # 컷오버 전에는 -- --base=/axe/ 였다
 ```
 
-`base` 를 vite.config 에 박지 않고 빌드 플래그로 두는 이유 = dev(`/`)와 prod(`/axe/`)의 유일한 차이라서.
+### SSO 콜백 포워딩 심 (컷오버가 만든 유일한 앱 변경)
+
+서버는 SSO 콜백을 자기 `DOMAIN` 설정값 = `https://vault.axelabs.ai` 의 **루트 +
+`#/sso?code=…`** 로 307 한다. 컷오버 전에는 그 자리가 스톡 볼트라 바로 완결됐지만,
+이제 거기엔 이 앱이 있다.
+
+이 앱은 그 흐름을 **완결할 수 없다**: PKCE `code_verifier` 는 흐름을 *시작한* 오리진
+(= classic)의 `sessionStorage` 에 있고, `sessionStorage` 는 오리진별로 격리된다.
+그래서 `src/lib/classic.ts` 의 심이 부트 최상단에서 hash 를 보고 **classic 으로 그대로
+넘긴다**(렌더하지 않는다). verifier 가 있는 오리진에서 원래대로 끝난다.
+
+서버의 `DOMAIN` 을 바꾸는 선택지도 있었지만, 그건 이메일 링크·SSO 등록 URL 등 다른
+것들을 연쇄로 흔들어서 택하지 않았다. 심은 `#/sso` 뒤 경계 문자(`?`·`&`·`/`)나 문자열
+끝만 인정해 `#/ssoconfig` 같은 라우트를 삼키지 않는다 (`tests/classic.test.mjs`).
 
 ### ingress 추가 (EC2 cloudflared)
 
@@ -64,22 +103,41 @@ blueprint·matrix 등을 전부 라우팅하고 있었다. 손으로 PUT 하면 
 같은 호스트의 bare 규칙 **앞**에 자동 삽입):
 
 ```bash
-AXE_CF_TUNNEL_UUID=54ba125d-3564-4b8f-bda6-8eda6ad1f2a0 \
-  axe tunnel add-ingress vault.axelabs.ai '^/axe(/.*)?$' http://web-axe:80
-# → inserted at index 22 (바로 뒤 23번이 기존 vault.axelabs.ai → vaultwarden)
+export AXE_CF_TUNNEL_UUID=54ba125d-3564-4b8f-bda6-8eda6ad1f2a0
+
+# ① 구 진입점 (최초 배포)                              → index 22
+axe tunnel add-ingress vault.axelabs.ai '^/axe(/.*)?$' http://web-axe:80
+
+# ② 스톡 볼트의 새 집 — DNS 먼저, 그다음 규칙           → index 26
+axe cf dns-ensure vault-classic.axelabs.ai \
+  --cname 54ba125d-3564-4b8f-bda6-8eda6ad1f2a0.cfargotunnel.com --proxied
+axe tunnel add-ingress vault-classic.axelabs.ai '.*' http://vaultwarden:80
+
+# ③ 루트 컷오버 — 이 한 줄이 컷오버 그 자체다             → index 23
+axe tunnel add-ingress vault.axelabs.ai '^/(|index\.html|assets/.*)$' http://web-axe:80
 ```
+
+세 번 다 **INSERT-only** 다. 기존 규칙을 고치거나 지우지 않았다 — 그래서 각각 그 한 줄만
+빼면 정확히 이전 상태로 돌아간다. `add-ingress` 는 같은 호스트의 bare 규칙 **앞**에
+자동 삽입하므로 순서를 손으로 계산할 필요도 없다.
 
 **cloudflared 재기동은 불필요하다** (설계에는 필요하다고 적혀 있었다). 원격 관리형이라 엣지가
 새 config 를 커넥터에 밀어 넣는다 — 실측 로그 `INF Updated to new configuration ... version=19`,
-`RestartCount=0`, 업타임 유지. 즉 **블립 0**.
+`RestartCount=0`, 업타임 유지. 즉 **블립 0**. 컷오버 전 구간(v19→v21)도 재기동 0 이었다.
 
-롤백 = 그 규칙 하나만 되돌린다. 기존 볼트 경로는 애초에 건드리지 않아 데이터 위험이 없다:
+**롤백** = 컷오버 규칙 한 줄 제거. 스냅샷을 미리 떠 두고 시작한다
+(`add-ingress` 는 백업을 남기지 않는다 — `set-ingress` 만 남긴다):
 
 ```bash
-# 편집 직전 전체 config 스냅샷을 떠 두고 시작할 것 (add-ingress 는 백업을 남기지 않는다).
-# 롤백: 스냅샷의 result.config 를 그대로 PUT 하거나, 규칙 하나만 빼고 PUT.
-GET/PUT https://api.cloudflare.com/client/v4/accounts/<acct>/cfd_tunnel/<uuid>/configurations
+# 컷오버 직전 스냅샷 (실제 파일):
+#   ~/.axe/tunnels/ingress-backups/54ba125d-…-20260814T012000Z-precutover.json
+# 롤백 = 그 파일의 result.config 를 그대로 PUT:
+PUT https://api.cloudflare.com/client/v4/accounts/<acct>/cfd_tunnel/<uuid>/configurations
+    body = {"config": <스냅샷의 result.config>}
 ```
+
+루트 컷오버만 되돌리고 `/axe/` 는 남기고 싶다면 `^/(|index\.html|assets/.*)$` 규칙 하나만
+배열에서 빼고 PUT 한다. 어느 쪽이든 vaultwarden 컨테이너와 데이터는 무접촉이다.
 
 ## 3. 정적 서빙 컨테이너 — 이미지가 아니라 bind mount
 
@@ -95,8 +153,12 @@ conf 2파일 = [`deploy/nginx/`](deploy/nginx/).
   `http://web-axe:80` 으로 직접 붙는다 (cloudflared 는 이 노드에서 11개 네트워크에 붙어 있다).
 - **디렉터리를 마운트한다, 단일 파일이 아니라.** 단일 파일 bind mount 는 inode 를 묶어서,
   나중에 conf 를 에디터로 다시 쓰면 새 inode 가 생기고 컨테이너는 옛 파일에 고착된다.
-- `dist/` 를 `/usr/share/nginx/html/axe` 에 두면 `/axe/*` 가 그대로 파일 경로에 매핑된다.
-  SPA 라우팅이 없으므로(단일 진입점) fallback 규칙이 불필요하다.
+- `dist/` 를 `/usr/share/nginx/html` 에 두면 `/` · `/assets/*` 가 그대로 파일 경로에
+  매핑된다 (컷오버 전에는 `.../html/axe` 였다 — 마운트 지점만 바뀌었다).
+  SPA 라우팅이 없으므로(단일 진입점) fallback 규칙이 불필요하다. 구 `/axe/` 는 nginx 가
+  같은 index 를 내주는 exact-match location 으로 살려 둔다.
+- **volume 을 바꾸면 컨테이너 재생성이 필요하다** (`up -d web-axe`). 이때도 서비스명을
+  반드시 명시할 것 — 아래 경고 참조.
 
 ⚠️ **`docker compose up -d` 를 인자 없이 돌리지 말 것.** 이 노드의 cloudflared 는 compose 가
 모르는 10개 네트워크에 추가로 붙어 있어서, 재생성되면 그 연결을 잃고 **플랫폼 전체가 끊긴다.**
@@ -109,9 +171,9 @@ Vite 가 이미 **content-hash 파일명**을 붙인다 (`index-CUA0DEhF.js`, `P
 
 | 경로 | `Cache-Control` | 근거 |
 |---|---|---|
-| `/axe/index.html` | `no-cache` | 해시 없음. 항상 재검증해 새 번들 해시를 집어야 한다 |
-| `/axe/assets/*` (js·css·woff2) | `public, max-age=31536000, immutable` | 파일명에 content hash → 내용이 바뀌면 이름이 바뀐다 |
-| `/axe/assets/*.wasm` | `public, max-age=31536000, immutable` | 동일. 아래 WASM 절 참조 |
+| `/` · `/index.html` · `/axe/` | `no-cache` | 해시 없음. 항상 재검증해 새 번들 해시를 집어야 한다 |
+| `/assets/*` (js·css·woff2) | `public, max-age=31536000, immutable` | 파일명에 content hash → 내용이 바뀌면 이름이 바뀐다 |
+| `/assets/*.wasm` | `public, max-age=31536000, immutable` | 동일. 아래 WASM 절 참조 |
 
 ⚠️ **nginx `add_header` 상속 함정 (리뷰 반영)**: location 블록에 `add_header` 가 **하나라도** 있으면
 부모(server) 레벨의 `add_header` 는 **전부 상속되지 않는다.** 아래처럼 캐시 헤더만 추가하면 그
@@ -124,18 +186,18 @@ Vite 가 이미 **content-hash 파일명**을 붙인다 (`index-CUA0DEhF.js`, `P
 server {
   include snippets/axe-security-headers.conf;   # add_header 없는 location 들의 기본값
 
-  location = /axe/index.html {
+  location = /index.html {
     include snippets/axe-security-headers.conf; # add_header 를 쓰는 순간 상속이 끊기므로 재-include 필수
     add_header Cache-Control "no-cache" always;
   }
-  location /axe/assets/ {
+  location /assets/ {
     include snippets/axe-security-headers.conf;
     add_header Cache-Control "public, max-age=31536000, immutable" always;
   }
 }
 ```
 
-배포 검증 시 `curl -sI` 로 **세 경로 모두**( `/axe/` · `/axe/index.html` · `/axe/assets/<파일>` )에서
+배포 검증 시 `curl -sI` 로 **세 경로 모두**( `/` · `/index.html` · `/assets/<파일>` )에서
 CSP 헤더가 실제로 나오는지 확인할 것 — 이 함정은 설정이 조용히 통과하고 헤더만 사라진다.
 
 ### WASM 이 캐싱 설계의 중심인 이유
@@ -189,7 +251,7 @@ cd web-axe
 npm ci
 npm run axe-ui:check                # @axe/ui Consumer Kit 드리프트
 npm test                            # 크립토 KAT + 서버 계약 카나리 (라이브 서버 왕복 포함)
-npm run build -- --base=/axe/       # base 는 vite.config 에 박지 않는다 (dev=/ 와의 유일한 차이)
+npm run build                       # base=/ (기본값). 컷오버 전에는 -- --base=/axe/ 였다
 
 # 사전 압축 — gzip 만. 폰트(woff2)는 이미 압축돼 있어 제외한다.
 find dist -type f \( -name '*.js' -o -name '*.css' -o -name '*.wasm' -o -name '*.html' \) \
@@ -217,20 +279,33 @@ docker compose -f /opt/axe/vault/docker-compose.yml up -d web-axe   # 서비스�
   재배포는 `rsync -a --delete` 로 **내용만** 교체한다. 파일명이 content-hash 라
   "새 파일 추가 → index.html 교체" 순서가 자연스럽게 무중단이다.
 - **전개 검산은 매니페스트 해시로**: `find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum`
-  을 로컬/호스트 양쪽에서 떠서 대조한다 (파일 수까지 함께). 배포된 값 = `1f8fe31c…`, 101 files.
+  을 로컬/호스트 양쪽에서 떠서 대조한다 (파일 수까지 함께).
+  배포된 값 = `160a2a05…`, 101 files (컷오버 전 `/axe/` 빌드는 `1f8fe31c…`).
+- ⚠️ **컷오버는 마지막 한 줄이어야 한다**: 컨테이너를 새 마운트로 먼저 띄우고 내부에서
+  전부 확인한 뒤, ingress 규칙을 마지막에 넣는다. 그러면 공개 트래픽이 바뀌는 순간이
+  단 한 번이고, 롤백도 그 한 줄만 되돌리면 된다.
 
 ### 사전 확인
 
 - [x] `npm run axe-ui:check` 통과 — @axe/ui 0.36.0, 555 selectors, `ff27964ef334`
-- [x] `npm test` 14/14 통과 (라이브 `prelogin` 왕복 + 클라이언트 버전 핀 대조 포함)
+- [x] `npm test` 17/17 통과 (라이브 `prelogin` 왕복 + 클라이언트 버전 핀 + SSO 심 경계)
 - [x] `dist/index.html` 에 인라인 `<script>` 0 개
-- [x] `/axe/` 200 + 자산 경로가 `/axe/assets/…` 로 나옴
-- [x] CSP 등 보안 헤더 7종이 **세 경로 모두**에서 실측됨 (4절 상속 함정)
+- [x] 루트 `/` 200 + `<title>AXE Vault</title>` + 자산이 `/assets/…`
+- [x] CSP 등 보안 헤더 7종이 **세 경로 모두**(`/`·`/index.html`·`/assets/<파일>`)에서 실측
 - [x] `.wasm` = `application/wasm` + `immutable` + gzip 사전압축(2.75 MB/7.5 MB),
       압축 해제 후 sha256 이 로컬 원본과 일치
-- [x] 스톡 볼트 무영향 — `/` 200 · `/alive` 200 · `/identity/accounts/prelogin` 200 ·
-      `/api/config` 200, vaultwarden 컨테이너 ID·기동시각 불변
+- [x] **서버 경로 계약 무변화** — 컷오버 전/후 16종의 상태코드 + 본문 sha256 완전 일치
+      (`/api/config` `/alive` `/css/vaultwarden.css` `/vw_static/*` `/icons/*`
+      `/sso-connector.html` `/admin` `/app/*` `/images/*` 루트 해시 파일
+      `/.well-known/*` `/notifications/*` `/attachments/*` + POST `prelogin`·`prelogin/password`)
+- [x] `vault-classic.axelabs.ai` = 스톡 볼트 (테마 CSS·번들 200, 절대주소로 튕기지 않음)
+- [x] `/axe/` 하위호환 200, `/axe` → 301
+- [x] SSO 심 — 출고된 minified 코드를 그대로 실행해 경계 동작 확인
+- [x] vaultwarden·cloudflared 컨테이너 ID 불변, cloudflared 재기동 0
 - [ ] **실계정 로그인 → sync → 복호 → TOTP → 잠금/해제 왕복 (운영자 입회)** ← 유일한 잔여
+- [ ] **SSO 실왕복 (운영자 입회)**: classic 에서 SSO 시작 → 콜백이 루트로 떨어짐 →
+      심이 classic 으로 되돌려 완결되는지. 심 로직은 단위/출고물 검증까지 끝났고
+      남은 건 실제 IdP 왕복이다.
 
 ## 7. 미결 사항
 

@@ -8,11 +8,15 @@
  */
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { describe } from "../lib/api.ts";
+import { CLASSIC_ORIGIN } from "../lib/classic.ts";
 import { PROVIDER_LABELS, TwoFactorRequiredError, PROVIDER_AUTHENTICATOR } from "../lib/auth.ts";
 import { SDK_VERSION } from "../sdk.ts";
 
-/** 스톡 볼트 — SSO·계정 설정·항목 편집처럼 P1 밖의 일은 여기로 보낸다. */
-const STOCK_VAULT_URL = "/";
+/**
+ * 스톡 볼트 — SSO·계정 설정·항목 편집처럼 P1 밖의 일은 여기로 보낸다.
+ * 2026-08-14 컷오버로 루트(`/`)는 이 앱이 됐다. 스톡 볼트는 별도 호스트로 옮겨졌다.
+ */
+const STOCK_VAULT_URL = CLASSIC_ORIGIN;
 
 function StatusBanner({ tone, title, description }: { tone: "error" | "info"; title: string; description?: ReactNode }) {
   return (

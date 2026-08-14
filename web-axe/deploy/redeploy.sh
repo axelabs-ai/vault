@@ -22,10 +22,12 @@ echo "==> 1/6 게이트 (드리프트 + 크립토 KAT + 서버 계약)"
 npm run axe-ui:check
 npm test
 
-echo "==> 2/6 빌드 (base=/axe/ — vite.config 에 박지 않는다)"
+echo "==> 2/6 빌드 (base=/ 기본값 — 2026-08-14 루트 컷오버 이후)"
 rm -rf dist
-npm run build -- --base=/axe/
-grep -q 'src="/axe/assets/' dist/index.html || { echo "!! base 가 /axe/ 로 안 잡혔다"; exit 1; }
+npm run build
+grep -q 'src="/assets/' dist/index.html || { echo "!! 자산 경로가 /assets/ 가 아니다"; exit 1; }
+# 컷오버가 만든 계약: 루트에 앱, SSO 콜백은 classic 으로 넘긴다. 심이 빠지면 SSO 가 죽는다.
+grep -q 'vault-classic.axelabs.ai' dist/assets/*.js || { echo "!! SSO 심이 번들에 없다"; exit 1; }
 # 배포 산출물에 인라인 <script> 가 있으면 prod CSP('unsafe-inline' 없음)가 거짓이 된다.
 if grep -o '<script[^>]*>' dist/index.html | grep -qv 'src='; then
   echo "!! dist/index.html 에 인라인 <script> 발견 — CSP 전제가 깨진다"; exit 1
@@ -111,5 +113,10 @@ else:
 PY
 
 echo "==> 검증 (공개 URL)"
-curl -sSI https://vault.axelabs.ai/axe/ | grep -iE '^(HTTP/|content-security-policy|cache-control):'
-echo "완료. 스톡 볼트 무영향 확인: curl -sI https://vault.axelabs.ai/alive"
+curl -sSI https://vault.axelabs.ai/ | grep -iE '^(HTTP/|content-security-policy|cache-control):'
+echo "-- 서버 경로 계약이 그대로인지 (하나라도 깨지면 클라이언트가 죽는다) --"
+for p in /api/config /alive /css/vaultwarden.css /sso-connector.html; do
+  printf '   %-28s ' "$p"
+  curl -sS -o /dev/null -w '%{http_code}\n' "https://vault.axelabs.ai$p"
+done
+echo "완료. 스톡 볼트: https://vault-classic.axelabs.ai/"

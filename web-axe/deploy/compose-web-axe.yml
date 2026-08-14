@@ -18,7 +18,8 @@ services:
     container_name: web-axe
     restart: unless-stopped
     volumes:
-      - /opt/axe/vault/web-axe-dist:/usr/share/nginx/html/axe:ro
+      # 2026-08-14 컷오버로 dist 가 루트에 붙는다 (이전에는 .../html/axe).
+      - /opt/axe/vault/web-axe-dist:/usr/share/nginx/html:ro
       - /opt/axe/vault/web-axe-nginx/conf.d:/etc/nginx/conf.d:ro
       - /opt/axe/vault/web-axe-nginx/snippets:/etc/nginx/snippets:ro
     # 호스트 포트를 열지 않는다 — cloudflared 가 vault_default 네트워크 안에서
@@ -26,7 +27,7 @@ services:
     expose:
       - "80"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:80/axe/index.html"]
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:80/"]
       interval: 30s
       retries: 5
       start_period: 10s
