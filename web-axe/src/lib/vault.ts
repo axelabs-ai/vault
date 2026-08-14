@@ -69,6 +69,27 @@ const asRecord = (v: unknown): Record<string, unknown> => (v && typeof v === "ob
 const asArray = (v: unknown): Record<string, unknown>[] => (Array.isArray(v) ? (v as Record<string, unknown>[]) : []);
 
 /**
+ * sync 프로필의 계정 이메일. 서버가 camelCase `email` 로 준다(fork 소스 db/models/user.rs
+ * `to_json`). SSO 는 사용자가 이메일을 입력하지 않으므로 KDF salt 를 여기서 얻는다.
+ */
+export function profileEmail(sync: Record<string, unknown>): string {
+  const email = pick<string>(asRecord(pick(sync, "profile", "Profile")), "email", "Email");
+  if (!email) throw new Error("sync 응답에 profile.email 이 없다 — 계정 이메일을 알 수 없다");
+  return email.trim().toLowerCase();
+}
+
+/**
+ * 마스터패스워드로 감싼 유저키가 서버에 있는가.
+ *
+ * SSO 로 처음 들어온 계정은 서버에 stub 으로만 생성돼(fork 소스 identity.rs `sso_login`
+ * → `User::new`) 이 키가 비어 있다. 그 상태로 잠금해제 화면을 띄우면 무엇을 입력해도
+ * 실패하므로, 화면을 그리기 전에 갈라내야 한다.
+ */
+export function hasWrappedUserKey(sync: Record<string, unknown>): boolean {
+  return !!pick<string>(asRecord(pick(sync, "profile", "Profile")), "key", "Key");
+}
+
+/**
  * 마스터패스워드로 유저키를 풀고, 개인키를 거쳐 조직 키까지 얻는다.
  * 개인키(RSA)는 org 키 decapsulate 에만 쓰이므로 즉시 zeroize 한다.
  */

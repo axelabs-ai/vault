@@ -11,6 +11,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="robots" content="noindex, nofollow" />
     <meta name="referrer" content="no-referrer" />
+    <!-- AXE 브랜드 마크 (neon-cross-star). 마스터 자산 = ~/AXE/favicon-build/ — 전 서비스가
+         같은 파일을 쓴다. 전부 같은 오리진의 정적 파일이라 CSP img-src 'self' 를 넘지 않는다.
+         ⚠ 이 세 경로는 배포 ingress allowlist 밖이면 vaultwarden(=Bitwarden 아이콘)이 받는다.
+         DEPLOY.md 2절의 favicon 규칙을 함께 적용해야 실제로 이 파일이 나간다. -->
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>AXE Vault</title>
   </head>
   <body>

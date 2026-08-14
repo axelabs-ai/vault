@@ -15,9 +15,12 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { authenticate, prelogin, type PreloginResult } from "./auth.ts";
+import { exchangeSsoCode } from "./sso.ts";
 import {
   buildIndex,
   fetchSync,
+  hasWrappedUserKey,
+  profileEmail,
   revealItem,
   unlockKeys,
   wipeKeys,
@@ -38,6 +41,12 @@ export interface Session {
   email: string;
   vault: VaultData | null;
   signIn: (email: string, password: string, twoFactorCode?: string) => Promise<void>;
+  /**
+   * SSO 콜백 완결 — Entra 인증 결과(code)를 토큰으로 바꾸고 암호문을 받아 온다.
+   * 여기서 끝나는 건 **인증**이고, 금고는 아직 잠긴 채다(phase="locked"). 복호는 이어지는
+   * 잠금해제 화면이 마스터 패스워드로 한다.
+   */
+  completeSso: (code: string, verifier: string, twoFactorCode?: string) => Promise<void>;
   unlock: (password: string) => Promise<void>;
   lock: () => void;
   logout: () => void;
@@ -96,6 +105,27 @@ export function useSession(): Session {
     setPhase("unlocked");
   }, [dropKeys]);
 
+  const completeSso = useCallback(async (code: string, verifier: string, twoFactorCode?: string) => {
+    const auth = await exchangeSsoCode(code, verifier, twoFactorCode);
+    const raw = await fetchSync(auth.accessToken);
+    if (!hasWrappedUserKey(raw)) {
+      throw new Error(
+        "이 계정에는 아직 마스터 패스워드가 없습니다. 기본 볼트에서 최초 설정을 마친 뒤 다시 시도하세요.",
+      );
+    }
+    const mail = profileEmail(raw);
+
+    // 인증만 끝났다. 키는 아직 없다 — rawSync 는 통째로 암호문이고, 잠금해제가 마스터
+    // 패스워드로 유저키를 유도해야 열린다. 그래서 로그인 직후 상태가 정확히 "locked" 다.
+    dropKeys();
+    rawSyncRef.current = raw;
+    preRef.current = { kdf: auth.kdf, salt: mail };
+    emailRef.current = mail;
+    setEmail(mail);
+    setVault(null);
+    setPhase("locked");
+  }, [dropKeys]);
+
   const unlock = useCallback(async (password: string) => {
     const raw = rawSyncRef.current;
     const pre = preRef.current;
@@ -132,5 +162,5 @@ export function useSession(): Session {
   // 언마운트(탭 이탈 포함) 시 키를 덮어쓴다. 메모리는 어차피 사라지지만 명시적으로 지운다.
   useEffect(() => dropKeys, [dropKeys]);
 
-  return { phase, email, vault, signIn, unlock, lock, logout, reveal };
+  return { phase, email, vault, signIn, completeSso, unlock, lock, logout, reveal };
 }

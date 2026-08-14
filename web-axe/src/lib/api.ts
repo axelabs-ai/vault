@@ -72,6 +72,11 @@ function clientHeaders(init?: Record<string, string>): Headers {
   return h;
 }
 
+export async function identityGet(path: string): Promise<unknown> {
+  const res = await fetch(`${identityUrl()}${path}`, { headers: clientHeaders() });
+  return readJson(res, `identity ${path}`);
+}
+
 export async function identityPost(path: string, body: URLSearchParams): Promise<unknown> {
   const res = await fetch(`${identityUrl()}${path}`, {
     method: "POST",

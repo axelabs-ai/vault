@@ -44,6 +44,7 @@
 | 호스트 / 경로 | 도착지 | 역할 |
 |---|---|---|
 | `vault.axelabs.ai/` · `/index.html` · `/assets/*` | **web-axe** | AXE Vault 앱 |
+| `vault.axelabs.ai/favicon.{ico,svg}` · `/apple-touch-icon.png` | **web-axe** (규칙 ④ 적용 후) | AXE 브랜드 아이콘. 규칙 전에는 vaultwarden 이 Bitwarden 아이콘을 낸다 |
 | `vault.axelabs.ai/axe/*` | **web-axe** | 구 진입점 하위호환 |
 | `vault.axelabs.ai` 의 **그 외 전부** | **vaultwarden** | `/api` `/identity` `/notifications` `/icons` `/attachments` `/alive` `/admin` `/css` `/vw_static` `/sso-connector.html` `/.well-known` `/app` `/images` · 루트 해시 파일(`styles.<hash>.css` 등) |
 | `vault-classic.axelabs.ai/*` | **vaultwarden** | 스톡 web-vault — 관리 콘솔·SSO 첫 가입·P1 미구현 기능 폴백 |
@@ -76,20 +77,31 @@ Vite `base` 는 이제 기본값(`/`)이라 빌드 플래그가 필요 없다:
 npm run build          # 컷오버 전에는 -- --base=/axe/ 였다
 ```
 
-### SSO 콜백 포워딩 심 (컷오버가 만든 유일한 앱 변경)
+### SSO 콜백 — 네이티브 완결 + 포워딩 심 (2026-08-14 갱신)
 
-서버는 SSO 콜백을 자기 `DOMAIN` 설정값 = `https://vault.axelabs.ai` 의 **루트 +
-`#/sso?code=…`** 로 307 한다. 컷오버 전에는 그 자리가 스톡 볼트라 바로 완결됐지만,
-이제 거기엔 이 앱이 있다.
+서버는 SSO 콜백을 자기 `DOMAIN` = `https://vault.axelabs.ai` 로 되돌린다. 정확한 경로는
+`{DOMAIN}/sso-connector.html?code=…&state=…` 이고(서버가 `client_id=web` 에서 클라이언트가
+보낸 redirect_uri 를 버리고 이 값으로 고정한다 — fork 소스 `src/sso.rs` `authorize_url`),
+그 스톡 정적 파일이 마지막으로 **루트 + `#/sso?code=…&state=…`** 로 넘긴다. 즉 착지점은
+이 앱이다. `sso-connector.html` 은 allowlist 밖이라 계속 vaultwarden 이 서빙한다.
 
-이 앱은 그 흐름을 **완결할 수 없다**: PKCE `code_verifier` 는 흐름을 *시작한* 오리진
-(= classic)의 `sessionStorage` 에 있고, `sessionStorage` 는 오리진별로 격리된다.
-그래서 `src/lib/classic.ts` 의 심이 부트 최상단에서 hash 를 보고 **classic 으로 그대로
-넘긴다**(렌더하지 않는다). verifier 가 있는 오리진에서 원래대로 끝난다.
+컷오버 직후에는 이 앱이 그 흐름을 **완결할 수 없었다** — PKCE `code_verifier` 가 흐름을
+시작한 오리진(=classic)의 `sessionStorage` 에 있었기 때문이다. 지금은 **이 앱도 흐름을
+시작한다**(로그인 화면의 "SSO 로 로그인"). 그래서 판정이 하나 늘었다:
 
-서버의 `DOMAIN` 을 바꾸는 선택지도 있었지만, 그건 이메일 링크·SSO 등록 URL 등 다른
-것들을 연쇄로 흔들어서 택하지 않았다. 심은 `#/sso` 뒤 경계 문자(`?`·`&`·`/`)나 문자열
-끝만 인정해 `#/ssoconfig` 같은 라우트를 삼키지 않는다 (`tests/classic.test.mjs`).
+| 콜백의 state | 처리 | 근거 |
+|---|---|---|
+| 이 탭이 저장한 값과 **일치** | **네이티브 완결** — 코드 교환 → 마스터 패스워드 잠금해제 | verifier 가 이 오리진에 있다 |
+| 불일치·부재 | 기존대로 **classic 포워딩** | verifier 가 저쪽에 있다 (외부 개시 흐름 보존) |
+
+판정은 `src/lib/sso.ts` `ssoRoute`/`takeSsoRoute`, 포워딩 목적지 계산은 그대로
+`src/lib/classic.ts`. 경계 정규식을 두 곳이 공유해 `#/ssoconfig` 같은 라우트를 삼키지
+않는다 (`tests/classic.test.mjs` + `tests/sso.test.mjs`). 서버의 `DOMAIN` 은 여전히
+건드리지 않는다 — 이메일 링크·SSO 등록 URL 이 연쇄로 흔들린다.
+
+⚠️ **dev(:4290)에서는 왕복이 끝나지 않는다.** 서버 `DOMAIN` 이 프로덕션이라 콜백이
+`vault.axelabs.ai` 로 착지한다. dev 에서 실측 가능한 것은 시작 레그(prevalidate →
+authorize → Entra 도달)까지다. 완결 레그는 프로덕션에서만 육안 검증할 수 있다.
 
 ### ingress 추가 (EC2 cloudflared)
 
@@ -115,6 +127,11 @@ axe tunnel add-ingress vault-classic.axelabs.ai '.*' http://vaultwarden:80
 
 # ③ 루트 컷오버 — 이 한 줄이 컷오버 그 자체다             → index 23
 axe tunnel add-ingress vault.axelabs.ai '^/(|index\.html|assets/.*)$' http://web-axe:80
+
+# ④ 브랜드 아이콘 (⚠️ 미적용 — 다음 배포에서 함께 넣을 것)
+#    이 규칙이 없으면 /favicon.* 는 allowlist 밖이라 vaultwarden 이 받아
+#    **Bitwarden 아이콘**을 계속 낸다. index.html 의 <link> 만으로는 효과가 없다.
+axe tunnel add-ingress vault.axelabs.ai '^/(favicon\.(ico|svg)|apple-touch-icon\.png)$' http://web-axe:80
 ```
 
 세 번 다 **INSERT-only** 다. 기존 규칙을 고치거나 지우지 않았다 — 그래서 각각 그 한 줄만

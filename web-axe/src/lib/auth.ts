@@ -22,22 +22,31 @@ export interface PreloginResult {
   salt: string;
 }
 
-/** 서버의 구형 평면 prelogin JSON → SDK Kdf 매핑. 데이터 매핑이지 크립토가 아니다. */
-export function mapPrelogin(raw: Record<string, unknown>, email: string): PreloginResult {
+/**
+ * 서버의 구형 평면 KDF JSON → SDK Kdf 매핑. 데이터 매핑이지 크립토가 아니다.
+ *
+ * 두 곳이 같은 모양을 준다: `/accounts/prelogin` 응답과, `/connect/token` 성공 응답의
+ * `Kdf`·`KdfIterations`·`KdfMemory`·`KdfParallelism`
+ * (fork 소스 src/api/identity.rs `authenticated_response`). SSO 경로는 prelogin 을
+ * 치지 않고 토큰 응답에서 곧바로 이 값을 얻는다.
+ */
+export function mapKdf(raw: Record<string, unknown>): Kdf {
   const iterations = Number(pick<number>(raw, "kdfIterations", "KdfIterations") ?? 0);
-  if (!iterations) throw new Error(`prelogin 응답에 kdfIterations 가 없다: ${JSON.stringify(raw).slice(0, 200)}`);
+  if (!iterations) throw new Error(`KDF 파라미터에 kdfIterations 가 없다: ${JSON.stringify(raw).slice(0, 200)}`);
   const kdfType = Number(pick<number>(raw, "kdf", "Kdf") ?? 0);
-  const kdf: Kdf =
-    kdfType === 0
-      ? { pBKDF2: { iterations } }
-      : {
-          argon2id: {
-            iterations,
-            memory: Number(pick<number>(raw, "kdfMemory", "KdfMemory") ?? 64),
-            parallelism: Number(pick<number>(raw, "kdfParallelism", "KdfParallelism") ?? 4),
-          },
-        };
-  return { kdf, salt: normalizeEmail(email) };
+  return kdfType === 0
+    ? { pBKDF2: { iterations } }
+    : {
+        argon2id: {
+          iterations,
+          memory: Number(pick<number>(raw, "kdfMemory", "KdfMemory") ?? 64),
+          parallelism: Number(pick<number>(raw, "kdfParallelism", "KdfParallelism") ?? 4),
+        },
+      };
+}
+
+export function mapPrelogin(raw: Record<string, unknown>, email: string): PreloginResult {
+  return { kdf: mapKdf(raw), salt: normalizeEmail(email) };
 }
 
 /** 익명 엔드포인트 — 자격증명 없이 KDF 파라미터만 받아 온다. */
@@ -97,7 +106,10 @@ export interface AuthResult {
   masterPasswordUnlockPresent: boolean;
 }
 
-function twoFactorProviders(body: unknown): number[] | null {
+/** SSO 는 이메일을 사용자가 입력하지 않는다 — sync 프로필에서 읽으므로 여기 없다. */
+export type SsoAuthResult = Omit<AuthResult, "email">;
+
+export function twoFactorProviders(body: unknown): number[] | null {
   const o = body as Record<string, unknown> | null;
   if (!o || typeof o !== "object") return null;
   const raw = pick<unknown>(o, "TwoFactorProviders", "twoFactorProviders");
@@ -105,6 +117,59 @@ function twoFactorProviders(body: unknown): number[] | null {
   const raw2 = pick<Record<string, unknown>>(o, "TwoFactorProviders2", "twoFactorProviders2");
   if (raw2 && typeof raw2 === "object") return Object.keys(raw2).map(Number).filter(Number.isFinite);
   return null;
+}
+
+/**
+ * 서버가 password grant / authorization_code grant 양쪽에 공통으로 요구하는 필드.
+ * (fork 소스 src/api/identity.rs 의 `login` — 두 갈래 모두 client_id·device_* 를 검사한다.
+ *  스톡 web-vault 번들의 `toIdentityToken` 베이스도 정확히 이 집합을 만든다 — 실측 2026-08-14.)
+ */
+export function grantBaseFields(): URLSearchParams {
+  return new URLSearchParams({
+    scope: SCOPE,
+    client_id: CLIENT_ID,
+    deviceType: String(DEVICE_TYPE),
+    deviceIdentifier: deviceIdentifier(),
+    deviceName: DEVICE_NAME,
+  });
+}
+
+/** password·SSO 양쪽이 요구하는 scope. 서버는 문자열 완전일치를 본다 (src/auth.rs `check_scope`). */
+export const SCOPE = "api offline_access";
+
+/** 2FA 코드를 grant 바디에 얹는다. 기억 토큰은 영속 저장을 전제하므로 항상 끈다. */
+export function applyTwoFactor(body: URLSearchParams, twoFactorCode: string | undefined): void {
+  if (!twoFactorCode?.trim()) return;
+  body.set("twoFactorToken", twoFactorCode.trim().replace(/\s/g, ""));
+  body.set("twoFactorProvider", String(PROVIDER_AUTHENTICATOR));
+  body.set("twoFactorRemember", "0");
+}
+
+/**
+ * `/connect/token` 왕복 + 2FA 요구 정규화 + access_token 추출.
+ * grant 종류(password·authorization_code)와 무관한 공통 껍데기다.
+ */
+export async function tokenGrant(body: URLSearchParams): Promise<{ json: Record<string, unknown>; accessToken: string }> {
+  let json: Record<string, unknown>;
+  try {
+    json = (await identityPost("/connect/token", body)) as Record<string, unknown>;
+  } catch (e) {
+    if (e instanceof HttpError) {
+      const providers = twoFactorProviders(e.body);
+      if (providers?.length) throw new TwoFactorRequiredError(providers);
+    }
+    throw e;
+  }
+
+  const accessToken = pick<string>(json, "access_token", "accessToken");
+  if (!accessToken) throw new Error("토큰 응답에 access_token 이 없다");
+  return { json, accessToken };
+}
+
+/** 서버가 신형 계약(masterPasswordUnlock)을 줬는지 — 계약 드리프트 관측용. */
+export function masterPasswordUnlockPresent(json: Record<string, unknown>): boolean {
+  const udo = pick<Record<string, unknown>>(json, "userDecryptionOptions", "UserDecryptionOptions");
+  return !!pick(udo, "masterPasswordUnlock", "MasterPasswordUnlock");
 }
 
 /**
@@ -126,45 +191,20 @@ export async function authenticate(
     masterKey.fill(0);
   }
 
-  const body = new URLSearchParams({
-    grant_type: "password",
-    username: mail,
-    password: authHash,
-    scope: "api offline_access",
-    client_id: CLIENT_ID,
-    deviceType: String(DEVICE_TYPE),
-    deviceIdentifier: deviceIdentifier(),
-    deviceName: DEVICE_NAME,
-  });
-  if (twoFactorCode?.trim()) {
-    body.set("twoFactorToken", twoFactorCode.trim().replace(/\s/g, ""));
-    body.set("twoFactorProvider", String(PROVIDER_AUTHENTICATOR));
-    // 기억하지 않는다 — 기억 토큰은 영속 저장을 전제하고 P1 은 그걸 금지한다.
-    body.set("twoFactorRemember", "0");
-  }
-
-  let json: Record<string, unknown>;
-  try {
-    json = (await identityPost("/connect/token", body)) as Record<string, unknown>;
-  } catch (e) {
-    if (e instanceof HttpError) {
-      const providers = twoFactorProviders(e.body);
-      if (providers?.length) throw new TwoFactorRequiredError(providers);
-    }
-    throw e;
-  }
-
-  const token = pick<string>(json, "access_token", "accessToken");
-  if (!token) throw new Error("토큰 응답에 access_token 이 없다");
+  const body = grantBaseFields();
+  body.set("grant_type", "password");
+  body.set("username", mail);
+  body.set("password", authHash);
+  applyTwoFactor(body, twoFactorCode);
 
   // refresh_token 은 의도적으로 버린다 — 보관하려면 어딘가에 두어야 하고 P1 은 영속 저장을
   // 금지한다. 액세스 토큰은 최초 sync 에만 쓰이고, 잠금 해제는 메모리의 암호문을 다시 풀 뿐
   // 네트워크를 타지 않으므로 만료가 화면을 막지 않는다.
-  const udo = pick<Record<string, unknown>>(json, "userDecryptionOptions", "UserDecryptionOptions");
+  const { json, accessToken } = await tokenGrant(body);
   return {
-    accessToken: token,
+    accessToken,
     kdf: pre.kdf,
     email: mail,
-    masterPasswordUnlockPresent: !!pick(udo, "masterPasswordUnlock", "MasterPasswordUnlock"),
+    masterPasswordUnlockPresent: masterPasswordUnlockPresent(json),
   };
 }
