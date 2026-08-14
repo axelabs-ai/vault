@@ -43,14 +43,9 @@ function AuthShell({ heading, lead, children }: { heading: string; lead: string;
       </a>
 
       <section className="axe-pattern-auth__context" aria-labelledby="auth-context-title">
-        {/*
-          `__context-top` 은 계약상 브랜드 + 후행 요소 2칸 flex 행이다. 그 후행 자리(원래
-          "Password manager" 라벨)에 서비스 전환기를 세운다 — vault 가 AXE 플랫폼의 한
-          서비스임을 로그인 전에 보이고, 다른 서비스로 나가는 진입점이 된다.
-        */}
         <div className="axe-pattern-auth__context-top">
           <span className="axe-logo">AXE Vault</span>
-          <ServiceSwitcher />
+          <span lang="en">Password manager</span>
         </div>
 
         <div className="axe-pattern-auth__context-copy">
@@ -97,9 +92,17 @@ function AuthShell({ heading, lead, children }: { heading: string; lead: string;
 
       <section className="axe-pattern-auth__stage" aria-label="로그인">
         <div className="axe-pattern-auth__card" id="auth-panel" tabIndex={-1}>
+          {/*
+            서비스 전환기는 **카드 헤더**에 있다. 좌측 브랜드 패널의 같은 자리
+            (`__context-top` 의 후행 요소)에도 넣을 수 있지만, 패턴이 ≤799.98px 에서 그
+            자리를 접는다(`.axe-pattern-auth__context-top > span { display: none }` — 좁은
+            폭에서 그 행은 로고만 남긴다). 카드 헤더는 전 폭에서 서므로 모바일에서도 전환기가
+            닿는다. 원래 이 자리에 있던 "Vault" 라벨을 전환기가 대신한다 — 같은 말을 하면서
+            누를 수 있다.
+          */}
           <div className="axe-pattern-auth__card-brand">
             <span className="axe-logo axe-logo--sm">AXE</span>
-            <span lang="en">Vault</span>
+            <ServiceSwitcher />
           </div>
 
           <header className="axe-pattern-auth__card-header">

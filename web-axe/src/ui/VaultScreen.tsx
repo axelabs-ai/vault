@@ -16,7 +16,8 @@ import { IDLE_LOCK_MS } from "../lib/session.ts";
 import type { RevealedItem, SecretField, VaultData, VaultItem } from "../lib/vault.ts";
 import { CIPHER_TYPE_LABEL } from "../lib/vault.ts";
 import { ItemDetail } from "./ItemDetail.tsx";
-import { IconCollection, IconFolder, IconList, IconStar, IconVault } from "./icons.tsx";
+import { IconCollection, IconFolder, IconList, IconStar } from "./icons.tsx";
+import { ServiceSwitcher } from "./ServiceSwitcher.tsx";
 
 type Filter =
   | { kind: "all" }
@@ -144,11 +145,15 @@ export function VaultScreen({ email, vault, reveal, onLock, onLogout }: Props) {
       <div className="axe-app-shell__main">
         <aside className="axe-app-shell__sidebar" aria-label="Primary">
           <nav className="axe-workspace-rail" aria-label="금고 탐색">
+            {/*
+              레일 머리 행. @axe/ui 레일 구성 계약(`contracts/rail-selectors/contract.json`
+              의 `composition` → slot `axe-workspace-rail__brand`)은 이 자리의 첫 자식으로
+              **서비스 전환기를 required 로 명시**한다. 예전의 `--static` 워드마크 칩은 그
+              자리를 이름표로만 쓰고 있어 계약 미달이었다 — 전환기로 바꾸면서 해소된다.
+              제품명은 전환기가 목록(contracts/services.ts)에서 가져오므로 여기서 쓰지 않는다.
+            */}
             <div className="axe-workspace-rail__brand">
-              <span className="axe-workspace-entity axe-workspace-entity--static">
-                <IconVault />
-                <span className="axe-workspace-entity__label">AXE Vault</span>
-              </span>
+              <ServiceSwitcher />
             </div>
 
             <div className="axe-workspace-rail__body">
