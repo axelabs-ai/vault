@@ -1,4 +1,4 @@
-# web-axe 배포 (P1 — 2026-08-14 배포 + 루트 컷오버 완료)
+# web-axe 배포 (P1 — 2026-08-14 배포 + 루트 컷오버 + SSO 네이티브 재배포 완료)
 
 `B-vault-axe-frontend` P1 산출물의 배포 설계 + 실제 배포 기록.
 
@@ -6,10 +6,12 @@
 스톡 web-vault 는 **https://vault-classic.axelabs.ai/** 로 옮겨졌다 (같은 vaultwarden
 컨테이너, 호스트명만 다르다). 구 진입점 `https://vault.axelabs.ai/axe/` 도 하위호환으로 산다.
 
-같은 날 두 번에 나눠 배포했다: 먼저 `/axe/` 서브패스로 올리고(설계 원안), 이어서 운영자
-지시로 루트 컷오버를 했다. 설계의 1·4·5절은 그대로 살아 있고, 실행하며 사실과 달랐던
-곳(2절 ingress 관리 방식, 3절 컨테이너 패키징)은 실측으로 교정했다.
-남은 검증은 6절 "사전 확인" 의 운영자 입회 실사용 왕복뿐이다.
+같은 날 세 번에 나눠 배포했다: 먼저 `/axe/` 서브패스로 올리고(설계 원안), 이어서 운영자
+지시로 루트 컷오버를 했고, 마지막으로 SSO 네이티브 로그인 + 브랜드 아이콘 빌드(`1249fa3`)를
+재배포하며 **미적용으로 남아 있던 ingress 규칙 ④**를 넣었다. 설계의 1·4·5절은 그대로 살아
+있고, 실행하며 사실과 달랐던 곳(2절 ingress 관리 방식, 3절 컨테이너 패키징)은 실측으로
+교정했다. 남은 검증은 6절 "사전 확인" 의 운영자 입회 실사용 왕복 + `/favicon.ico` 엣지
+캐시 만료(2절 ④)뿐이다.
 
 ## 1. 왜 same-origin 이어야 하는가 (선택이 아니라 제약)
 
@@ -44,7 +46,7 @@
 | 호스트 / 경로 | 도착지 | 역할 |
 |---|---|---|
 | `vault.axelabs.ai/` · `/index.html` · `/assets/*` | **web-axe** | AXE Vault 앱 |
-| `vault.axelabs.ai/favicon.{ico,svg}` · `/apple-touch-icon.png` | **web-axe** (규칙 ④ 적용 후) | AXE 브랜드 아이콘. 규칙 전에는 vaultwarden 이 Bitwarden 아이콘을 낸다 |
+| `vault.axelabs.ai/favicon.{ico,svg}` · `/apple-touch-icon.png` | **web-axe** (규칙 ④, 2026-08-14 적용됨) | AXE 브랜드 아이콘 |
 | `vault.axelabs.ai/axe/*` | **web-axe** | 구 진입점 하위호환 |
 | `vault.axelabs.ai` 의 **그 외 전부** | **vaultwarden** | `/api` `/identity` `/notifications` `/icons` `/attachments` `/alive` `/admin` `/css` `/vw_static` `/sso-connector.html` `/.well-known` `/app` `/images` · 루트 해시 파일(`styles.<hash>.css` 등) |
 | `vault-classic.axelabs.ai/*` | **vaultwarden** | 스톡 web-vault — 관리 콘솔·SSO 첫 가입·P1 미구현 기능 폴백 |
@@ -128,13 +130,34 @@ axe tunnel add-ingress vault-classic.axelabs.ai '.*' http://vaultwarden:80
 # ③ 루트 컷오버 — 이 한 줄이 컷오버 그 자체다             → index 23
 axe tunnel add-ingress vault.axelabs.ai '^/(|index\.html|assets/.*)$' http://web-axe:80
 
-# ④ 브랜드 아이콘 (⚠️ 미적용 — 다음 배포에서 함께 넣을 것)
+# ④ 브랜드 아이콘 (2026-08-14 적용됨)                     → index 24, version 21→22
 #    이 규칙이 없으면 /favicon.* 는 allowlist 밖이라 vaultwarden 이 받아
 #    **Bitwarden 아이콘**을 계속 낸다. index.html 의 <link> 만으로는 효과가 없다.
 axe tunnel add-ingress vault.axelabs.ai '^/(favicon\.(ico|svg)|apple-touch-icon\.png)$' http://web-axe:80
 ```
 
-네 번 다 **INSERT-only** 다 (①~③ 적용됨, ④ 미적용). 기존 규칙을 고치거나 지우지 않는다 —
+⚠️ **④ 의 함정 — 규칙이 맞아도 `/favicon.ico` 는 즉시 안 바뀐다 (2026-08-14 실측)**:
+`.svg`·`.png` 는 규칙 적용 직후 AXE 아이콘이 나갔지만 `.ico` 만 **Bitwarden 것이 계속
+나왔다**. 오리진은 정상이었다 — 캐시키를 비껴가는 `?cachebust=…` 로 치면 AXE 마스터가
+바이트 단위로 일치했다. 원인은 **Cloudflare 엣지 캐시**다: 규칙 적용 *전*에 vaultwarden 이
+`Cache-Control: public, max-age=604800, immutable` 로 내준 응답을 엣지가 물고 있었고
+(`cf-cache-status: HIT`, `age` 약 4.4시간), `.svg`·`.png` 는 그 전에 404 라 캐시된 객체가
+없어서 바로 바뀐 것이다. 즉 **"이미 200 으로 서빙되던 경로를 새 오리진으로 옮길 때만"**
+나오는 함정이다.
+
+정상 해소 = 단일 URL 퍼지 (zone 전체 `--everything` 은 플랫폼 공유라 금지):
+
+```bash
+axe cf purge https://vault.axelabs.ai/favicon.ico
+```
+
+**단, 지금은 이 명령이 HTTP 401 로 막힌다** — vault 의 `Cloudflare API - axelabs` 토큰에
+`Zone: Cache Purge` 권한이 없다 (`cloudflare/axe/zone-settings-token`·
+`account-tunnel-dns-token` 도 동일하게 401). 권한을 추가하기 전까지는 엣지 TTL 이 자연
+만료될 때까지(적용 시점 기준 약 6.8일) 콜로별로 순차 반영된다 — 캐시가 없던 콜로는 첫
+요청에 바로 AXE 아이콘을 받는다. 백로그 = `B-cf-token-cache-purge`.
+
+네 번 다 **INSERT-only** 다 (①~④ 전부 적용됨). 기존 규칙을 고치거나 지우지 않는다 —
 그래서 각각 그 한 줄만 빼면 정확히 이전 상태로 돌아간다. `add-ingress` 는 같은 호스트의 bare 규칙 **앞**에
 자동 삽입하므로 순서를 손으로 계산할 필요도 없다.
 
@@ -146,8 +169,9 @@ axe tunnel add-ingress vault.axelabs.ai '^/(favicon\.(ico|svg)|apple-touch-icon\
 (`add-ingress` 는 백업을 남기지 않는다 — `set-ingress` 만 남긴다):
 
 ```bash
-# 컷오버 직전 스냅샷 (실제 파일):
-#   ~/.axe/tunnels/ingress-backups/54ba125d-…-20260814T012000Z-precutover.json
+# 스냅샷 (실제 파일, ~/.axe/tunnels/ingress-backups/ 아래):
+#   54ba125d-…-20260814T012000Z-precutover.json   ← 루트 컷오버 직전 (version 21 이전)
+#   54ba125d-…-20260814T052753Z-prefavicon.json   ← 규칙 ④ 직전 (version 21, 28 rules)
 # 롤백 = 그 파일의 result.config 를 그대로 PUT:
 PUT https://api.cloudflare.com/client/v4/accounts/<acct>/cfd_tunnel/<uuid>/configurations
     body = {"config": <스냅샷의 result.config>}
@@ -297,7 +321,11 @@ docker compose -f /opt/axe/vault/docker-compose.yml up -d web-axe   # 서비스�
   "새 파일 추가 → index.html 교체" 순서가 자연스럽게 무중단이다.
 - **전개 검산은 매니페스트 해시로**: `find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum`
   을 로컬/호스트 양쪽에서 떠서 대조한다 (파일 수까지 함께).
-  배포된 값 = `160a2a05…`, 101 files (컷오버 전 `/axe/` 빌드는 `1f8fe31c…`).
+  현재 배포된 값 = `bf130abc…`, 104 files (`1249fa3` SSO 네이티브 빌드 — 아이콘 3개가 늘어
+  101 → 104). 이전: 루트 컷오버 `160a2a05…`/101, 그 전 `/axe/` 빌드 `1f8fe31c…`.
+- ⚠️ **이미 200 이던 경로를 새 오리진으로 옮기면 Cloudflare 엣지가 옛 응답을 물고 있다**:
+  ingress 규칙이 맞아도 공개 URL 이 안 바뀐다. `?cachebust=…` 로 캐시키를 비껴가 오리진을
+  먼저 분리 확인하고, `axe cf purge <url>` 로 단일 URL 만 퍼지한다. 상세 = 2절 ④ 의 함정.
 - ⚠️ **컷오버는 마지막 한 줄이어야 한다**: 컨테이너를 새 마운트로 먼저 띄우고 내부에서
   전부 확인한 뒤, ingress 규칙을 마지막에 넣는다. 그러면 공개 트래픽이 바뀌는 순간이
   단 한 번이고, 롤백도 그 한 줄만 되돌리면 된다.
@@ -305,9 +333,14 @@ docker compose -f /opt/axe/vault/docker-compose.yml up -d web-axe   # 서비스�
 ### 사전 확인
 
 - [x] `npm run axe-ui:check` 통과 — @axe/ui 0.36.0, 555 selectors, `ff27964ef334`
-- [x] `npm test` 17/17 통과 (라이브 `prelogin` 왕복 + 클라이언트 버전 핀 + SSO 심 경계)
+- [x] `npm test` 39/39 통과 (라이브 `prelogin` 왕복 + 클라이언트 버전 핀 + SSO 심 경계
+      + 네이티브 SSO PKCE/교환/2FA)
 - [x] `dist/index.html` 에 인라인 `<script>` 0 개
 - [x] 루트 `/` 200 + `<title>AXE Vault</title>` + 자산이 `/assets/…`
+- [x] **루트가 새 빌드** — 공개 `index.html` + 참조 자산 2개가 로컬 `dist/` 와 sha256 완전 일치
+      (`index-MflxdPX7.js` · `index-DXZzmPRn.css`)
+- [x] **브랜드 아이콘** — `/favicon.svg`·`/apple-touch-icon.png` 이 `~/AXE/favicon-build/`
+      마스터와 sha256 일치. `/favicon.ico` 는 오리진 일치, 공개 URL 은 엣지 캐시 만료 대기(2절 ④)
 - [x] CSP 등 보안 헤더 7종이 **세 경로 모두**(`/`·`/index.html`·`/assets/<파일>`)에서 실측
 - [x] `.wasm` = `application/wasm` + `immutable` + gzip 사전압축(2.75 MB/7.5 MB),
       압축 해제 후 sha256 이 로컬 원본과 일치
@@ -315,11 +348,16 @@ docker compose -f /opt/axe/vault/docker-compose.yml up -d web-axe   # 서비스�
       (`/api/config` `/alive` `/css/vaultwarden.css` `/vw_static/*` `/icons/*`
       `/sso-connector.html` `/admin` `/app/*` `/images/*` 루트 해시 파일
       `/.well-known/*` `/notifications/*` `/attachments/*` + POST `prelogin`·`prelogin/password`)
+- [x] **재배포(`1249fa3`) 전/후에도 계약 무변화** — `/api/config` `/css/vaultwarden.css`
+      `/sso-connector.html` `/vw_static/*` 의 상태코드 + 본문 sha256 동일, POST `prelogin` 동일,
+      `/alive` 200(타임스탬프라 값만 다름), 루트 해시 파일 `styles.*.css`·`app/vendor.*.js` 200
 - [x] `vault-classic.axelabs.ai` = 스톡 볼트 (테마 CSS·번들 200, 절대주소로 튕기지 않음)
 - [x] `/axe/` 하위호환 200, `/axe` → 301
 - [x] SSO 심 — 출고된 minified 코드를 그대로 실행해 경계 동작 확인
 - [x] vaultwarden·cloudflared 컨테이너 ID 불변, cloudflared 재기동 0
-- [ ] **실계정 로그인 → sync → 복호 → TOTP → 잠금/해제 왕복 (운영자 입회)** ← 유일한 잔여
+      (규칙 ④ 적용 후에도 `RestartCount=0`, `StartedAt` 불변 — 원격 관리형이라 블립 0)
+- [ ] **`/favicon.ico` 공개 URL** — 오리진은 확인됨, 엣지 캐시가 만료(또는 퍼지)되어야 반영 (2절 ④)
+- [ ] **실계정 로그인 → sync → 복호 → TOTP → 잠금/해제 왕복 (운영자 입회)**
 - [ ] **SSO 실왕복 (운영자 입회)**: classic 에서 SSO 시작 → 콜백이 루트로 떨어짐 →
       심이 classic 으로 되돌려 완결되는지. 심 로직은 단위/출고물 검증까지 끝났고
       남은 건 실제 IdP 왕복이다.
