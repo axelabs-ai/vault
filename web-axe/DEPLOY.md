@@ -1,7 +1,11 @@
-# web-axe 배포 설계 (P1 — 설계만, 구현은 후속)
+# web-axe 배포 (P1 — 2026-08-14 배포 완료)
 
-`B-vault-axe-frontend` P1 산출물의 배포안. **아직 배포하지 않는다** — 이 문서는 상위 세션이
-운영자와 실사용 검증을 마친 뒤 실행할 계획서다.
+`B-vault-axe-frontend` P1 산출물의 배포 설계 + 실제 배포 기록.
+**LIVE: https://vault.axelabs.ai/axe/** (2026-08-14, origin/main `e9c87b5` 빌드).
+
+설계는 아래 1·4·5절이 그대로 살아 있고, 실행하면서 사실과 달랐던 두 곳(2절 ingress 관리
+방식, 3절 컨테이너 패키징)을 실측으로 교정했다. 남은 검증은 6절 "사전 확인" 의 운영자
+입회 실사용 왕복뿐이다.
 
 ## 1. 왜 same-origin 이어야 하는가 (선택이 아니라 제약)
 
@@ -50,35 +54,53 @@ npm run build -- --base=/axe/
 
 ### ingress 추가 (EC2 cloudflared)
 
-`config.yml` 의 ingress 규칙은 **위에서부터** 매칭되므로 `/axe` 규칙이 기존 catch-all 보다 앞서야 한다.
+⚠️ **설계가 틀렸던 지점 (2026-08-14 실측 교정)**: 이 터널에는 `config.yml` 이 **없다.**
+EC2 의 cloudflared 는 `TUNNEL_TOKEN` + `tunnel run` 으로 도는 **원격 관리형**(`config_src=cloudflare`)
+이고 (`docker inspect cloudflared` → `Mounts: []`), ingress 는 Cloudflare 의 configurations API 에
+산다. 게다가 이 터널은 **플랫폼 전체가 공유**한다 — 편집 전 25개 규칙이 gate·layer·hive·frame·
+blueprint·matrix 등을 전부 라우팅하고 있었다. 손으로 PUT 하면 전 서비스가 걸린다.
 
-```yaml
-ingress:
-  - hostname: vault.axelabs.ai
-    path: ^/axe(/.*)?$
-    service: http://axe-vault-web:80      # 새 정적 컨테이너
-  - hostname: vault.axelabs.ai
-    service: http://vault-caddy:80        # 기존 (변경 없음)
-  - service: http_status:404
+그래서 파일을 고치는 대신 전용 도구를 쓴다 (INSERT-only, 동일 규칙이면 무동작, catch-all 과
+같은 호스트의 bare 규칙 **앞**에 자동 삽입):
+
+```bash
+AXE_CF_TUNNEL_UUID=54ba125d-3564-4b8f-bda6-8eda6ad1f2a0 \
+  axe tunnel add-ingress vault.axelabs.ai '^/axe(/.*)?$' http://web-axe:80
+# → inserted at index 22 (바로 뒤 23번이 기존 vault.axelabs.ai → vaultwarden)
 ```
 
-롤백 = 첫 규칙 한 블록 삭제 후 `cloudflared` 재기동. 기존 볼트 경로는 애초에 건드리지 않으므로
-롤백에 데이터 위험이 없다.
+**cloudflared 재기동은 불필요하다** (설계에는 필요하다고 적혀 있었다). 원격 관리형이라 엣지가
+새 config 를 커넥터에 밀어 넣는다 — 실측 로그 `INF Updated to new configuration ... version=19`,
+`RestartCount=0`, 업타임 유지. 즉 **블립 0**.
 
-## 3. 정적 서빙 컨테이너
+롤백 = 그 규칙 하나만 되돌린다. 기존 볼트 경로는 애초에 건드리지 않아 데이터 위험이 없다:
 
-```dockerfile
-# 빌드는 CI/호스트에서 끝내고 이미지는 산출물만 담는다 (런타임에 node 불필요).
-FROM nginx:alpine
-COPY dist/ /usr/share/nginx/html/axe/
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-# 4절 location 들이 include 하는 보안 헤더 스니펫 — 이 COPY 가 빠지면 include 대상
-# 부재로 nginx 설정 검증/기동이 실패한다 (리뷰 반영).
-COPY axe-security-headers.conf /etc/nginx/snippets/axe-security-headers.conf
+```bash
+# 편집 직전 전체 config 스냅샷을 떠 두고 시작할 것 (add-ingress 는 백업을 남기지 않는다).
+# 롤백: 스냅샷의 result.config 를 그대로 PUT 하거나, 규칙 하나만 빼고 PUT.
+GET/PUT https://api.cloudflare.com/client/v4/accounts/<acct>/cfd_tunnel/<uuid>/configurations
 ```
 
-`dist/` 를 `/axe/` 아래에 두면 nginx `try_files` 가 프리픽스를 그대로 서빙한다. SPA 라우팅이
-없으므로(단일 진입점) fallback 규칙도 불필요하다.
+## 3. 정적 서빙 컨테이너 — 이미지가 아니라 bind mount
+
+설계는 Dockerfile 로 산출물을 구운 이미지였다. **실제로는 스톡 `nginx:alpine` + bind mount 로
+갔다**: 정적 파일 11 MB 때문에 이미지 태그 수명주기(빌드·푸시·레지스트리·pull)를 하나 더 만들
+이유가 없고, 롤백이 "이전 dist 를 되돌리고 restart" 로 끝난다.
+
+실제 배포된 조각 = [`deploy/compose-web-axe.yml`](deploy/compose-web-axe.yml)
+(`/opt/axe/vault/docker-compose.yml` 의 `services:` 아래에 그대로 들어가 있다).
+conf 2파일 = [`deploy/nginx/`](deploy/nginx/).
+
+- **호스트 포트를 열지 않는다.** cloudflared 가 `vault_default` 네트워크 안에서
+  `http://web-axe:80` 으로 직접 붙는다 (cloudflared 는 이 노드에서 11개 네트워크에 붙어 있다).
+- **디렉터리를 마운트한다, 단일 파일이 아니라.** 단일 파일 bind mount 는 inode 를 묶어서,
+  나중에 conf 를 에디터로 다시 쓰면 새 inode 가 생기고 컨테이너는 옛 파일에 고착된다.
+- `dist/` 를 `/usr/share/nginx/html/axe` 에 두면 `/axe/*` 가 그대로 파일 경로에 매핑된다.
+  SPA 라우팅이 없으므로(단일 진입점) fallback 규칙이 불필요하다.
+
+⚠️ **`docker compose up -d` 를 인자 없이 돌리지 말 것.** 이 노드의 cloudflared 는 compose 가
+모르는 10개 네트워크에 추가로 붙어 있어서, 재생성되면 그 연결을 잃고 **플랫폼 전체가 끊긴다.**
+반드시 서비스명을 명시한다: `docker compose up -d web-axe`.
 
 ## 4. 캐싱 전략
 
@@ -157,24 +179,58 @@ add_header Cross-Origin-Resource-Policy "same-origin" always;
 - `connect-src 'self'` 는 이 앱의 성질을 그대로 못박는다 — 자기 오리진(=금고 서버) 외에는 어디에도
   말을 걸지 않는다.
 
-## 6. 배포 절차 (예정)
+## 6. 배포 절차 (실행됨)
+
+빌드 → S3 스테이징 → SSM 으로 호스트에 전개 → compose 서비스 기동 → ingress 한 줄.
+재배포는 [`deploy/redeploy.sh`](deploy/redeploy.sh) 가 이 순서를 그대로 담고 있다.
 
 ```bash
 cd web-axe
 npm ci
-npm run axe-ui:check          # @axe/ui Consumer Kit 드리프트 확인
-npm test                      # 크립토 KAT + 서버 계약 카나리
-npm run build -- --base=/axe/
-# → dist/ 를 이미지에 담아 EC2 로, ingress 규칙 추가 후 cloudflared 재기동
+npm run axe-ui:check                # @axe/ui Consumer Kit 드리프트
+npm test                            # 크립토 KAT + 서버 계약 카나리 (라이브 서버 왕복 포함)
+npm run build -- --base=/axe/       # base 는 vite.config 에 박지 않는다 (dev=/ 와의 유일한 차이)
+
+# 사전 압축 — gzip 만. 폰트(woff2)는 이미 압축돼 있어 제외한다.
+find dist -type f \( -name '*.js' -o -name '*.css' -o -name '*.wasm' -o -name '*.html' \) \
+  -exec gzip -9 -k -f {} +
 ```
+
+호스트 전개 (`axe` CLI 의 기존 관례 = SSE S3 스테이징 + SSM):
+
+```bash
+COPYFILE_DISABLE=1 tar czf web-axe-deploy.tgz -C stage .   # ⚠️ 아래 함정 참조
+aws s3 cp web-axe-deploy.tgz \
+  s3://axelabs-axe-backup-offsite-6051/_deploy-staging/vault-web-axe/web-axe-deploy.tgz \
+  --sse AES256 --region ap-northeast-2
+# SSM: s3 cp → sha256 -c → rsync -a --delete 로 /opt/axe/vault/{web-axe-dist,web-axe-nginx}
+docker compose -f /opt/axe/vault/docker-compose.yml up -d web-axe   # 서비스명 명시 필수 (3절)
+```
+
+### 실행하며 밟은 함정 (다음 사람이 같은 데 빠지지 않게)
+
+- ⚠️ **macOS `tar` 의 AppleDouble**: 그냥 `tar czf` 하면 xattr 가 `._*` 파일로 딸려 간다.
+  그중 `conf.d/._default.conf` 는 nginx 의 `include conf.d/*.conf` 에 **걸려서 파싱되고**,
+  바이너리라 기동이 깨진다. `COPYFILE_DISABLE=1` (+ `xattr -rc`) 로 차단할 것.
+  검산: `tar tzf … | grep -c '\._'` 가 0.
+- ⚠️ **디렉터리를 `mv` 로 갈아치우지 말 것**: bind mount 가 옛 inode 에 고착된다.
+  재배포는 `rsync -a --delete` 로 **내용만** 교체한다. 파일명이 content-hash 라
+  "새 파일 추가 → index.html 교체" 순서가 자연스럽게 무중단이다.
+- **전개 검산은 매니페스트 해시로**: `find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum`
+  을 로컬/호스트 양쪽에서 떠서 대조한다 (파일 수까지 함께). 배포된 값 = `1f8fe31c…`, 101 files.
 
 ### 사전 확인
 
-- [ ] `npm run axe-ui:check` 통과 (kit 이 axelabs 정본과 동일한 content-sha256)
-- [ ] `dist/index.html` 에 인라인 `<script>` 0 개
-- [ ] `/axe/` 로 열었을 때 `/identity/accounts/prelogin` 이 same-origin 으로 200
-- [ ] 실계정 로그인 → sync → 복호 → TOTP → 잠금/해제 왕복 (운영자 입회)
-- [ ] 스톡 볼트(`/`) 무영향 확인
+- [x] `npm run axe-ui:check` 통과 — @axe/ui 0.36.0, 555 selectors, `ff27964ef334`
+- [x] `npm test` 14/14 통과 (라이브 `prelogin` 왕복 + 클라이언트 버전 핀 대조 포함)
+- [x] `dist/index.html` 에 인라인 `<script>` 0 개
+- [x] `/axe/` 200 + 자산 경로가 `/axe/assets/…` 로 나옴
+- [x] CSP 등 보안 헤더 7종이 **세 경로 모두**에서 실측됨 (4절 상속 함정)
+- [x] `.wasm` = `application/wasm` + `immutable` + gzip 사전압축(2.75 MB/7.5 MB),
+      압축 해제 후 sha256 이 로컬 원본과 일치
+- [x] 스톡 볼트 무영향 — `/` 200 · `/alive` 200 · `/identity/accounts/prelogin` 200 ·
+      `/api/config` 200, vaultwarden 컨테이너 ID·기동시각 불변
+- [ ] **실계정 로그인 → sync → 복호 → TOTP → 잠금/해제 왕복 (운영자 입회)** ← 유일한 잔여
 
 ## 7. 미결 사항
 
@@ -185,5 +241,14 @@ npm run build -- --base=/axe/
   또한 게이트는 `axe-ui.consumer.json` 을 **repo 루트**에서 찾는다 — 지금은 `web-axe/` 안에 있다.
 - **`Bitwarden-Client-Version` 핀**: 서버의 스톡 web-vault 를 올리면 `src/lib/api.ts` 의 상수도
   같이 올려야 한다. `tests/server-contract.test.mjs` 가 라이브 번들과 대조해 감시한다.
-- **압축 산출물**: `.br`/`.gz` 사전 압축을 빌드 파이프라인 어디서 만들지 미정 (Dockerfile 빌드
-  스테이지 vs CI).
+- ~~**압축 산출물**: `.br`/`.gz` 사전 압축을 빌드 파이프라인 어디서 만들지 미정~~
+  → **확정**: 이미지 빌드 스테이지가 사라졌으므로(3절) **호스트 빌드 직후 `gzip -9 -k`**
+  로 만들어 dist 와 함께 전개한다 (6절). brotli 는 계속 쓰지 않는다 — `nginx:alpine` 에
+  모듈이 없다.
+- **`index.html` 에 CSP meta 가 2개 나온다** (신규 발견, 배포와는 무관):
+  `vite.config.ts` 의 `cspMeta` 플러그인이 하나를 주입하는데, `e9c87b5` 가 `index.html`
+  소스에도 실물을 하나 넣었다. prod 는 두 정책이 **동일**해서 교집합도 동일 — 무해하다.
+  하지만 **dev 는 깨진다**: 플러그인은 dev 에서 `script-src` 에 `'unsafe-inline'` 을 넣는데
+  소스의 meta 에는 없고, CSP 가 여러 개면 브라우저는 **교집합**을 적용하므로 HMR 인라인
+  스크립트가 차단된다. 둘 중 하나로 정리해야 한다 (플러그인만 남기거나, 플러그인이 소스의
+  meta 를 치환하도록). 배포된 산출물에는 영향이 없어 이번 배포에서는 손대지 않았다.
