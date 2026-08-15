@@ -40,6 +40,7 @@ import {
   armResume,
   clearSession,
   dropResume,
+  idleExpired,
   markActivity,
   restoreFailurePhase,
   restoreSession,
@@ -274,6 +275,76 @@ export async function pullSync(
     if (!attempt.live()) throw new AbandonedError();
     onRotate(saveSession(facts, rotated, userKey), rotated);
     return { raw: await fetchSync(rotated.accessToken, signal), tokens: rotated };
+  }
+}
+
+/**
+ * 이어가기 한 건의 결말. 화면 조작은 하지 않는다 — 훅이 이 값을 받아 설치·폐기를 결정한다.
+ *
+ * `abandon` 이 따로 있는 이유: 취소는 **아무것도 하지 않는 것**이 정답이다. 잠금·로그아웃·
+ * 출구 버튼이 이미 화면을 정했으므로, 뒤늦게 도착한 완료가 그 위에 phase 를 덮어쓰면 안 된다.
+ */
+export type ResumeOutcome =
+  | { kind: "adopt"; raw: Record<string, unknown>; tokens: TokenPair; userKey: Uint8Array }
+  /** 취소됐다 — 유도 키는 이미 지웠고, 화면도 저장분도 건드리지 않는다. */
+  | { kind: "abandon" }
+  /** 이어갈 수 없다 — 봉인·랩 키를 폐기하고 잠금 화면(마스터 패스워드)으로. */
+  | { kind: "lock" }
+  /** 세션 자체가 죽었다 — 저장분을 버리고 사유와 함께 로그인으로. */
+  | { kind: "forget"; reason: string };
+
+/**
+ * 이어가기 한 건 — 봉인 해제부터 채택 직전까지. 훅 밖의 순수 함수다
+ * (tests/session-restore.test.mjs 가 취소·마감선을 여기에 주입해 확인한다).
+ *
+ * 두 개의 문이 이 함수의 존재 이유다:
+ *
+ *  1. **취소는 봉인 읽기 구간부터 닿는다.** 이어가기 화면의 출구("기다리지 않고 마스터
+ *     패스워드로 열기")·유휴 잠금·로그아웃은 언제든 들어올 수 있다. 그때 진행 중이던
+ *     이어가기가 나중에 완료돼 금고를 열어 버리면, 사용자가 내린 더 최근의 지시가 뒤집힌다.
+ *     그래서 유도된 유저키를 **얻는 즉시 시도에 등록**하고, 취소가 지나갔으면 같은 문
+ *     (`cancelAttempt`)으로 그 키까지 지운 뒤 `abandon` 으로 물러난다.
+ *  2. **유휴 마감선을 채택 직전에 다시 본다.** 부팅 1회 검사만으로는 부족하다 — 마감 직전에
+ *     시작한 이어가기가 sync 왕복(수 초) 동안 마감선을 넘어 열릴 수 있다. 이 검사와 반환
+ *     사이에는 await 가 없고, 호출부의 `adopt` 는 이 반환에 이어지는 동기 구간에 있다.
+ */
+export async function openResume(
+  stored: StoredSession,
+  facts: SessionFacts,
+  attempt: Attempt,
+  onRotate: (stored: StoredSession) => void,
+): Promise<ResumeOutcome> {
+  const payload = await takeResume(stored);
+  if (!payload) return attempt.live() ? { kind: "lock" } : { kind: "abandon" };
+  // 등록이 먼저다 — 취소가 이미 지나갔더라도 이 뒤늦은 키가 같은 문으로 지워지게.
+  attempt.secrets.push(payload.userKey);
+  if (!attempt.live()) {
+    cancelAttempt(attempt);
+    return { kind: "abandon" };
+  }
+
+  try {
+    const pulled = await pullSync(facts, payload.tokens, payload.userKey, attempt, (next) => {
+      if (attempt.live()) onRotate(next);
+    });
+    if (!attempt.live()) return { kind: "abandon" };
+    // 서버에서 키가 회전됐다면 이 봉인은 폐기된 옛 세션이다 — 화면을 열기 **전에** 걸린다.
+    if (staleSessionMetadata(pulled.raw, facts)) {
+      payload.userKey.fill(0);
+      return { kind: "forget", reason: ACCOUNT_CHANGED };
+    }
+    // 마감선 재확인 (위 2). 여기부터 반환까지, 그리고 호출부의 adopt 까지 await 가 없다.
+    if (idleExpired()) {
+      payload.userKey.fill(0);
+      return { kind: "lock" };
+    }
+    return { kind: "adopt", raw: pulled.raw, tokens: pulled.tokens, userKey: payload.userKey };
+  } catch (e) {
+    if (!attempt.live() || isAbort(e) || e instanceof AbandonedError) return { kind: "abandon" };
+    payload.userKey.fill(0);
+    // 서버가 세션을 거부했으면 저장분 자체가 쓸모없다. 네트워크 실패면 잠금 화면에 남아
+    // 마스터 패스워드로 다시 시도하게 한다 — 잠금해제 실패와 같은 규칙이다.
+    return restoreFailurePhase(e) === "login" ? { kind: "forget", reason: describe(e) } : { kind: "lock" };
   }
 }
 
@@ -589,16 +660,18 @@ export function useSession(): Session {
    * (토큰 회전 포함), 같은 신선도 대조(staleSessionMetadata), 같은 채택(adopt), 같은 실패 라우팅.
    * 복원 전용 경로를 따로 파지 않은 이유가 이것이다 — 갈라 두면 한쪽에만 가드가 붙는다.
    *
-   * 봉인을 풀지 못하는 모든 경우(랩 키 없음·암호문 손상·저장소 차단)와 서버 왕복 실패는 전부
-   * **기존 잠금 화면(마스터 패스워드) 경로로 폴백**하고, 그때 봉인을 폐기한다.
+   * 판단은 전부 `openResume`(순수 함수)이 하고, 여기서는 그 결말을 설치한다. 취소된 결말
+   * (`abandon`)에는 **아무것도 하지 않는다** — 잠금·로그아웃·출구 버튼이 이미 화면을 정했다.
    *
-   * 단일 실행 보장은 `resumingRef` 가 한다 — StrictMode 의 이중 마운트에서 두 번 도는 것을
-   * 막는다. (effect cleanup 의 `cancelWork` 는 이 시점에 아직 등록된 시도가 없어 닿지 않는다.)
+   * `resumeRef` 는 겹침 방지다. **취소된 시도만 다시 시작할 수 있다** — StrictMode 의 이중
+   * 마운트는 setup → cleanup(cancelWork 로 첫 시도 취소) → setup 순이라, 여기서 재시작을
+   * 허용하지 않으면 dev 에서만 이어가기가 죽는다. 반대로 이미 돌고 있거나 끝까지 간 시도는
+   * 다시 시작하지 않는다.
    */
-  const resumingRef = useRef(false);
+  const resumeRef = useRef<Attempt | null>(null);
   const resume = useCallback(async () => {
-    if (resumingRef.current) return;
-    resumingRef.current = true;
+    const prior = resumeRef.current;
+    if (prior && !prior.cancelled) return;
 
     /** 봉인을 쓸 수 없다 — 랩 키까지 치우고 기존 잠금 화면(마스터 패스워드)으로 넘긴다. */
     const fallback = () => {
@@ -609,37 +682,31 @@ export function useSession(): Session {
     const facts = factsRef.current;
     const stored = storedRef.current;
     if (!facts || !stored) return fallback();
-    const payload = await takeResume(stored);
-    if (!payload) return fallback();
 
-    // 취소(잠금·로그아웃)는 여기서부터 닿는다 — 시도를 등록해야 cancelWork 가 잡는다. 그
-    // 앞의 봉인 읽기 구간(IndexedDB 왕복 수 ms)은 취소를 놓치는데, 그 대가는 "취소를 눌렀는데
-    // 금고가 열린다" 뿐이고 그건 방금 이어가기를 시작한 사용자의 기본 동작이다. 대신 이 등록을
-    // **앞당기지 않는다** — StrictMode 의 이중 마운트 cleanup 이 첫 시도를 죽여 dev 에서만
-    // 이어가기가 깨진다.
+    // **봉인을 읽기 전에** 등록한다 — 그래야 잠금·로그아웃·출구 버튼의 취소가 읽기 구간부터
+    // 닿고, 뒤늦은 완료가 금고를 열지 못한다 (openResume 의 첫 번째 문).
     const attempt = startAttempt(() => epochRef.current);
-    attempt.secrets.push(payload.userKey);
+    resumeRef.current = attempt;
     workRef.current = attempt;
     try {
-      const pulled = await pullSync(facts, payload.tokens, payload.userKey, attempt, (next) => {
-        if (attempt.live()) storedRef.current = next;
+      const outcome = await openResume(stored, facts, attempt, (next) => {
+        storedRef.current = next;
       });
-      if (!attempt.live()) return;
-      // 복원 직후의 신선도 대조. 서버에서 키가 회전됐다면 이 봉인은 폐기된 옛 세션이다 —
-      // 화면을 열어 주기 **전에** 걸린다.
-      if (staleSessionMetadata(pulled.raw, facts)) {
-        payload.userKey.fill(0);
-        forget(ACCOUNT_CHANGED);
-        return;
+      switch (outcome.kind) {
+        case "adopt":
+          // openResume 의 마지막 문에서 여기까지 await 가 없다.
+          adopt(outcome.raw, facts, outcome.tokens, outcome.userKey);
+          return;
+        case "forget":
+          forget(outcome.reason);
+          return;
+        case "lock":
+          fallback();
+          return;
+        case "abandon":
+          // 더 최근의 지시(잠금·로그아웃·출구)가 이미 화면을 정했다. 덮어쓰지 않는다.
+          return;
       }
-      adopt(pulled.raw, facts, pulled.tokens, payload.userKey);
-    } catch (e) {
-      if (!attempt.live() || isAbort(e) || e instanceof AbandonedError) return;
-      payload.userKey.fill(0);
-      // 서버가 세션을 거부했으면 저장분 자체가 쓸모없다(forget). 네트워크 실패면 잠금 화면에
-      // 남아 마스터 패스워드로 다시 시도하게 한다 — 잠금해제 실패와 같은 규칙이다.
-      if (restoreFailurePhase(e) === "login") forget(describe(e));
-      else fallback();
     } finally {
       if (workRef.current === attempt) workRef.current = null;
     }

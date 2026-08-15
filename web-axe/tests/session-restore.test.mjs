@@ -923,6 +923,108 @@ test("유휴 시계 — 표식이 없거나 읽을 수 없으면 만료로 본�
   assert.equal(persist.idleExpired(t0), true);
 });
 
+/**
+ * 이어가기 한 건의 결말(openResume). 여기서 막는 것은 **더 최근의 지시가 뒤집히는 일**이다:
+ *  · 사용자가 "기다리지 않고 마스터 패스워드로 열기" 를 눌렀는데(또는 잠금·로그아웃) 진행
+ *    중이던 이어가기가 나중에 완료돼 금고를 열어 버리면, 화면은 멀쩡하지만 사용자가 내린
+ *    지시가 조용히 무시된 것이다.
+ *  · 마감 직전에 시작한 이어가기가 sync 왕복 동안 마감선을 넘어 열리면, 유휴 잠금은 왕복
+ *    시간만큼 늘어나는 잠금이 된다.
+ */
+test("이어가기 취소 — 봉인을 읽는 중 취소되면 뒤늦은 완료가 금고를 열지 않는다", async () => {
+  const { stored } = await armed();
+  const facts = FACTS();
+
+  const attempt = session.startAttempt(() => 0);
+  // 이 시도가 봉인에서 유도해 낸 비밀을 잡아 둔다 (함수 밖에서는 보이지 않는다).
+  const derived = [];
+  const push = attempt.secrets.push.bind(attempt.secrets);
+  attempt.secrets.push = (...keys) => (derived.push(...keys), push(...keys));
+
+  const origFetch = globalThis.fetch;
+  let synced = false;
+  globalThis.fetch = async () => {
+    synced = true;
+    return res(200, syncFor(facts.encUserKey, facts.email));
+  };
+  try {
+    const inflight = session.openResume(stored, facts, attempt, () => assert.fail("취소된 시도가 저장분을 갱신했다"));
+    // 출구 버튼·유휴 잠금·로그아웃이 하는 일이 정확히 이 취소다.
+    session.cancelAttempt(attempt);
+
+    const outcome = await inflight;
+    // "abandon" = 훅이 아무 setState 도 하지 않는 결말 (phase 는 취소가 정한 그대로 남는다).
+    assert.equal(outcome.kind, "abandon", "취소된 시도가 채택 재료를 내놨다");
+    assert.equal(synced, false, "취소했는데 서버 왕복이 일어났다");
+    assert.equal(derived.length, 1, "봉인에서 유도한 키를 시도에 등록하지 않았다 (취소가 못 지운다)");
+    assert.ok(zeroed(derived[0]), "취소했는데 뒤늦게 도착한 유저키가 살아 있다");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("이어가기 취소 — sync 왕복 중 취소도 같은 결말이다", async () => {
+  const { stored } = await armed();
+  const facts = FACTS();
+  const attempt = session.startAttempt(() => 0);
+
+  let release;
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = (_url, init) =>
+    new Promise((resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+      release = resolve;
+    });
+  try {
+    const inflight = session.openResume(stored, facts, attempt, () => {});
+    // 왕복이 끝나기 전에 잠금이 들어온다.
+    await new Promise((r) => setTimeout(r, 10));
+    session.cancelAttempt(attempt);
+
+    assert.equal((await inflight).kind, "abandon");
+    assert.equal(attempt.controller.signal.aborted, true, "진행 중 왕복이 실제로 끊기지 않았다");
+    assert.equal(attempt.secrets.length, 0);
+    release?.(res(200, syncFor(facts.encUserKey, facts.email)));
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("이어가기 — sync 왕복 동안 유휴 마감선을 넘으면 채택하지 않고 잠근다", async () => {
+  const { stored } = await armed();
+  const facts = FACTS();
+
+  const origFetch = globalThis.fetch;
+  // 마감 직전에 시작한 이어가기 = 왕복 도중에 마감선이 지나간다 (탭 절전·느린 서버).
+  globalThis.fetch = async () => {
+    persist.markActivity(Date.now() - persist.IDLE_LOCK_MS - 1);
+    return res(200, syncFor(facts.encUserKey, facts.email));
+  };
+  try {
+    const outcome = await session.openResume(stored, facts, session.startAttempt(() => 0), () => {});
+    assert.equal(outcome.kind, "lock", "마감선을 넘긴 세션이 열렸다 — 부팅 1회 검사만으로는 부족하다");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("이어가기 — 마감선 안이면 채택 재료를 그대로 내준다 (마스터 패스워드를 묻지 않는다)", async () => {
+  const { key, stored } = await armed();
+  const facts = FACTS();
+
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => res(200, syncFor(facts.encUserKey, facts.email));
+  try {
+    const outcome = await session.openResume(stored, facts, session.startAttempt(() => 0), () => {});
+    assert.equal(outcome.kind, "adopt");
+    assert.deepEqual([...outcome.userKey], [...key], "봉인이 돌려준 유저키가 원본과 다르다");
+    assert.deepEqual(outcome.tokens, TOKENS());
+    assert.equal(session.prepareAdoption(outcome.raw, facts, outcome.tokens, outcome.userKey).data.items.length, 0);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 test("토큰이 회전되면 봉인도 회전분으로 다시 걸린다 (죽은 토큰을 이어가지 않는다)", async () => {
   const key = userKey();
   const first = await armed(key, TOKENS());

@@ -3,4 +3,4 @@ profile: core-data
 compat: modern
 asset-base: fonts
 content-sha256: ff27964ef33448405efd77ed5833266fa495a6ebf1e03c8e7eaf2c06d09cf344
-provider-commit: e0e94614bd1e935d9909a781a44c5345b5add2d0
+provider-commit: 28fcd5aa2bb42e9e7bc2a8d2db3a1834468a52bf
