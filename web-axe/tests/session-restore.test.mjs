@@ -40,12 +40,14 @@ globalThis.location = { origin: "https://vault.axelabs.ai", hash: "", pathname: 
 let persist;
 let api;
 let session;
+let vault;
 let PureCrypto;
 
 before(async () => {
   persist = await import("../src/lib/persist.ts");
   api = await import("../src/lib/api.ts");
   session = await import("../src/lib/session.ts");
+  vault = await import("../src/lib/vault.ts");
   ({ PureCrypto } = await import("../src/sdk.ts"));
 });
 
@@ -280,6 +282,92 @@ test("저장 페이로드 검사에 걸려도 마찬가지로 키를 지운다",
   assert.throws(() => session.prepareAdoption(RAW_SYNC(), { ...FACTS(), encUserKey: "평문" }, TOKENS(), key), /EncString/);
   assert.ok(key.every((b) => b === 0), "실패했는데 복호된 유저키가 살아 있다");
   assert.equal(stored(), undefined);
+});
+
+// -------------------------------------------- 조직 키 유도의 부분 결과 (누수 방지)
+
+/**
+ * 진짜 재료로 유도 상황을 만든다 — 실패 주입만 합성이다(2번째 조직에서 예외).
+ * 유도 중 만들어지는 버퍼는 함수 밖에서 볼 수 없으므로, SDK 호출을 **통과시키며 기록만 하는**
+ * 스파이로 참조를 잡는다. 크립토는 그대로 실물이 돌고, 우리가 보는 건 위생뿐이다.
+ */
+function orgFixture() {
+  const key = userKey();
+  const priv = PureCrypto.rsa_generate_keypair();
+  const pub = PureCrypto.rsa_extract_public_key(priv);
+  const orgKey = PureCrypto.make_user_key_aes256_cbc_hmac();
+  return {
+    key,
+    orgKey,
+    profile: {
+      privateKey: PureCrypto.wrap_decapsulation_key(priv, key),
+      encOrgKey: PureCrypto.encapsulate_key_unsigned(orgKey, pub),
+    },
+  };
+}
+
+function withSpies(run) {
+  const origUnwrap = PureCrypto.unwrap_decapsulation_key;
+  const origDecap = PureCrypto.decapsulate_key_unsigned;
+  const seen = { privateKeys: [], orgKeys: [] };
+  PureCrypto.unwrap_decapsulation_key = (...a) => {
+    const out = origUnwrap(...a);
+    seen.privateKeys.push(out);
+    return out;
+  };
+  PureCrypto.decapsulate_key_unsigned = (...a) => {
+    const out = origDecap(...a);
+    seen.orgKeys.push(out);
+    return out;
+  };
+  try {
+    return run(seen);
+  } finally {
+    PureCrypto.unwrap_decapsulation_key = origUnwrap;
+    PureCrypto.decapsulate_key_unsigned = origDecap;
+  }
+}
+
+const zeroed = (b) => b.every((x) => x === 0);
+
+test("조직 키 유도가 중간에 실패하면 그때까지 복호한 조직 키·개인키를 전부 지운다", () => {
+  const fx = orgFixture();
+  withSpies((seen) => {
+    const sync = {
+      profile: {
+        privateKey: fx.profile.privateKey,
+        organizations: [
+          { id: "org-1", key: fx.profile.encOrgKey },
+          // 2번째에서 유도 자체가 깨진다 (필드 접근이 터지는 응답 — decapsulate 개별 실패와 달리
+          // 이 예외는 루프 밖으로 나간다).
+          {
+            get id() {
+              throw new Error("유도 중 폭발");
+            },
+          },
+          { id: "org-3", key: fx.profile.encOrgKey },
+        ],
+      },
+    };
+
+    assert.throws(() => vault.deriveOrgKeys(sync, fx.key), /폭발/);
+    assert.equal(seen.orgKeys.length, 1, "1번째 조직까지만 복호됐어야 한다");
+    assert.ok(zeroed(seen.orgKeys[0]), "실패했는데 1번째 조직 키가 살아 있다");
+    assert.ok(zeroed(seen.privateKeys[0]), "실패했는데 개인키가 살아 있다");
+  });
+});
+
+test("성공 경로 — 조직 키는 살려 내보내고 개인키만 지운다", () => {
+  const fx = orgFixture();
+  withSpies((seen) => {
+    const sync = {
+      profile: { privateKey: fx.profile.privateKey, organizations: [{ id: "org-1", key: fx.profile.encOrgKey }] },
+    };
+
+    const keys = vault.deriveOrgKeys(sync, fx.key);
+    assert.deepEqual([...keys.get("org-1")], [...fx.orgKey], "조직 키가 원본과 달라졌다");
+    assert.ok(zeroed(seen.privateKeys[0]), "개인키는 org 키 유도에만 쓰이므로 남으면 안 된다");
+  });
 });
 
 // ------------------------------------------------- 토큰 만료 → 로그인 복귀

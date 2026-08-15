@@ -102,29 +102,46 @@ export function decryptUserKey(encUserKey: string, email: string, password: stri
 
 /**
  * 유저키로 개인키를 풀고, 그걸로 조직 키까지 얻는다.
- * 개인키(RSA)는 org 키 decapsulate 에만 쓰이므로 즉시 zeroize 한다.
+ *
+ * 중간 비밀은 하나도 살아 나가지 못한다:
+ *  · 개인키(RSA)는 org 키 decapsulate 에만 쓰이므로 성공·실패 무관하게 `finally` 에서 지운다.
+ *  · **부분 결과도 마찬가지다.** 순회 도중 예외가 나면 그때까지 복호해 둔 조직 키들이
+ *    호출부 손에 닿지 않은 채 버려진다(반환값이 없으니 caller 의 wipeKeys 가 볼 수 없다).
+ *    그래서 유도한 조직 키를 `derived` 한 통에 쌓고, 실패 경로에서 통째로 zeroize 한다 —
+ *    나중에 유도 대상이 늘어도 그 통에만 넣으면 누락이 생기지 않는다.
  */
 export function deriveOrgKeys(sync: Record<string, unknown>, userKey: Uint8Array): Map<string, Uint8Array> {
   const profile = asRecord(pick(sync, "profile", "Profile"));
   const orgKeys = new Map<string, Uint8Array>();
   const encPrivateKey = pick<string>(profile, "privateKey", "PrivateKey");
   const orgs = asArray(pick(profile, "organizations", "Organizations"));
-  if (encPrivateKey && orgs.length) {
-    const privateKey = PureCrypto.unwrap_decapsulation_key(encPrivateKey, userKey);
-    try {
-      for (const org of orgs) {
-        const id = pick<string>(org, "id", "Id");
-        const key = pick<string>(org, "key", "Key");
-        if (!id || !key) continue;
-        try {
-          orgKeys.set(id, PureCrypto.decapsulate_key_unsigned(key, privateKey));
-        } catch {
-          // 이 조직만 건너뛴다 — 해당 조직 항목이 목록에서 개별 에러로 표시된다.
-        }
+  if (!encPrivateKey || !orgs.length) return orgKeys;
+
+  /** 이 호출이 만들어 낸 비밀 전부. 실패하면 이 통을 통째로 닦는다. */
+  const derived: Uint8Array[] = [];
+  let privateKey: Uint8Array | null = null;
+  try {
+    privateKey = PureCrypto.unwrap_decapsulation_key(encPrivateKey, userKey);
+    for (const org of orgs) {
+      const id = pick<string>(org, "id", "Id");
+      const key = pick<string>(org, "key", "Key");
+      if (!id || !key) continue;
+      let orgKey: Uint8Array;
+      try {
+        orgKey = PureCrypto.decapsulate_key_unsigned(key, privateKey);
+      } catch {
+        // 이 조직만 건너뛴다 — 해당 조직 항목이 목록에서 개별 에러로 표시된다.
+        continue;
       }
-    } finally {
-      privateKey.fill(0);
+      derived.push(orgKey);
+      orgKeys.set(id, orgKey);
     }
+  } catch (e) {
+    for (const k of derived) k.fill(0);
+    orgKeys.clear();
+    throw e;
+  } finally {
+    privateKey?.fill(0);
   }
   return orgKeys;
 }
