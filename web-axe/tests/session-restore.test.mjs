@@ -1,5 +1,5 @@
 /**
- * 탭 세션 보존의 경계 검증 — "새로고침 = 잠금" 을 지탱하는 저장 계약.
+ * 탭 세션 보존의 경계 검증 — "새로고침 = 이어가기, 단 잠기지 않았을 때만" 을 지탱하는 저장 계약.
  *
  * 왜 이것들인가 — 전부 **조용히 어긋나는** 종류라서다:
  *  · 저장 페이로드에 평문이 한 번 섞이면 화면은 멀쩡히 동작한다. 눈으로는 영원히 안 보이고,
@@ -11,10 +11,14 @@
  *    살아 있는 상태가 만들어진다. 그건 어떤 화면에도 나타나지 않는다.
  *  · 토큰 만료와 네트워크 장애를 같이 처리하면, 잠깐 끊긴 와이파이가 재로그인을 강요하거나
  *    (반대로) 죽은 세션이 잠금 화면에 영원히 남는다.
+ *  · **재개 봉인은 잠금을 무력화할 수 있는 종류의 편의다.** 유휴 만료가 부팅에서 안 걸리면
+ *    새로고침만으로 15분 잠금이 무한 연장되고, 잠금·로그아웃이 랩 키를 안 지우면 "잠갔는데
+ *    새로고침 한 번에 열리는" 잠금이 된다. 어느 쪽도 화면에는 아무 흔적을 남기지 않는다.
  *
- * 브라우저 전역(sessionStorage·localStorage)은 Node 에 없으므로 최소 스텁을 여기서 깐다.
- * localStorage 스텁은 **쓰기를 시도하면 터진다** — 규칙 위반이 테스트 실패로 드러나게.
- * 크립토는 앱과 **같은 SDK 인스턴스**를 쓴다 (봉인을 우리가 흉내내면 검증의 의미가 없다).
+ * 브라우저 전역(sessionStorage·localStorage·indexedDB)은 Node 에 없으므로 최소 스텁을 여기서
+ * 깐다. localStorage 스텁은 **쓰기를 시도하면 터진다** — 규칙 위반이 테스트 실패로 드러나게.
+ * 크립토는 앱과 **같은 SDK/WebCrypto 인스턴스**를 쓴다 (봉인을 우리가 흉내내면 검증의 의미가
+ * 없다 — 특히 랩 키의 non-extractable 성질은 실물이라야 검증된다).
  */
 import { test, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -37,6 +41,52 @@ globalThis.localStorage = {
 };
 globalThis.location = { origin: "https://vault.axelabs.ai", hash: "", pathname: "/", search: "" };
 
+/**
+ * IndexedDB 최소 스텁 — 랩 키 보관의 계약만 흉내낸다: 비동기 요청, 최초 열기의 upgrade,
+ * 그리고 **트랜잭션 커밋(oncomplete)에서 나오는 결과**. 마지막 항목이 중요하다 — 삭제는
+ * 폐기 지점이라 "요청은 성공, 트랜잭션은 abort" 를 성공으로 읽으면 지워지지 않은 랩 키가
+ * 조용히 남는다.
+ */
+function makeIndexedDb() {
+  const dbs = new Map();
+  return {
+    open(name) {
+      const req = { result: null, onsuccess: null, onerror: null, onupgradeneeded: null, onblocked: null };
+      setTimeout(() => {
+        let stores = dbs.get(name);
+        const fresh = !stores;
+        if (fresh) dbs.set(name, (stores = new Map()));
+        req.result = {
+          objectStoreNames: { contains: (s) => stores.has(s) },
+          createObjectStore: (s) => stores.set(s, new Map()),
+          close: () => {},
+          transaction: (store) => {
+            const data = stores.get(store);
+            const tx = { oncomplete: null, onerror: null, onabort: null };
+            const request = (fn) => {
+              const r = { result: undefined };
+              setTimeout(() => {
+                r.result = fn();
+                tx.oncomplete?.();
+              }, 0);
+              return r;
+            };
+            tx.objectStore = () => ({
+              put: (v, k) => request(() => void data.set(k, v)),
+              get: (k) => request(() => data.get(k)),
+              delete: (k) => request(() => void data.delete(k)),
+            });
+            return tx;
+          },
+        };
+        if (fresh) req.onupgradeneeded?.();
+        req.onsuccess?.();
+      }, 0);
+      return req;
+    },
+  };
+}
+
 let persist;
 let api;
 let session;
@@ -54,6 +104,8 @@ before(async () => {
 beforeEach(() => {
   store.clear();
   sessionStub.setItem = (k, v) => store.set(k, String(v));
+  // 매 테스트가 빈 IndexedDB 에서 시작한다 (탭도 프로필도 새것).
+  globalThis.indexedDB = makeIndexedDb();
 });
 
 /** 합성 값 — 실계정·실볼트와 무관하다 (crypto.test.mjs 의 PoC 벡터와 같은 성격). */
@@ -69,6 +121,12 @@ const TOKENS = () => ({ accessToken: ACCESS_TOKEN, refreshToken: REFRESH_TOKEN }
 const userKey = () => PureCrypto.make_user_key_aes256_cbc_hmac();
 
 const stored = () => store.get("axe-vault.session");
+
+/**
+ * 재개 봉인이 없는 저장분(= 잠긴 탭이 들고 있는 전부)의 필드. `resume` 은 금고가 열려 있는
+ * 동안에만 붙으므로 이 목록에 없다 — 그 사실 자체가 계약이다.
+ */
+const SEALLESS_FIELDS = ["v", "email", "kdf", "encUserKey", "encTokens"];
 
 /** 잠긴 탭의 sessionStorage 를 통째로 뜬 것 — 공격자가 볼 수 있는 전부. */
 const dump = () => JSON.stringify([...store.entries()]);
@@ -99,7 +157,12 @@ test("낯선 스키마·오염된 저장분은 되살리지 않고 버린다", (
     JSON.stringify({ v: 99, ...FACTS(), encTokens: "2.a|b|c" }),
     // 구 스키마(v1, 평문 토큰) — 마이그레이션하지 않고 버린다. 평문 토큰을 되살릴 이유가 없다.
     JSON.stringify({ v: 1, ...FACTS(), accessToken: ACCESS_TOKEN, refreshToken: REFRESH_TOKEN }),
-    JSON.stringify({ v: 2, ...FACTS() }), // 봉인 누락
+    // 구 스키마(v2, 재개 봉인 개념 이전) — 마이그레이션하지 않고 버린다.
+    JSON.stringify({ v: 2, ...FACTS(), encTokens: "2.a|b|c" }),
+    JSON.stringify({ v: 3, ...FACTS() }), // 봉인 누락
+    // 재개 봉인이 오염된 경우도 부분 복원하지 않는다.
+    JSON.stringify({ v: 3, ...FACTS(), encTokens: "2.a|b|c", resume: { ct: "not base64!", iv: "AAAA" } }),
+    JSON.stringify({ v: 3, ...FACTS(), encTokens: "2.a|b|c", resume: { ct: "AAAA" } }),
   ];
   for (const j of junk) {
     store.set("axe-vault.session", j);
@@ -110,11 +173,17 @@ test("낯선 스키마·오염된 저장분은 되살리지 않고 버린다", (
 
 // ------------------------------------------------------- 탭 수명 · 로그아웃
 
-test("탭 계약 — 저장은 sessionStorage 의 axe-vault 이름공간에만 한다", () => {
-  persist.saveSession(FACTS(), TOKENS(), userKey());
+test("탭 계약 — 저장은 sessionStorage 의 axe-vault 이름공간에만 한다", async () => {
+  const key = userKey();
+  const s = persist.saveSession(FACTS(), TOKENS(), key);
   // localStorage 스텁이 쓰기에서 터지므로, 여기까지 왔다는 것 자체가 절반의 증명이다.
   assert.deepEqual([...store.keys()], ["axe-vault.session"]);
   assert.equal(persist.SESSION_KEY, "axe-vault.session");
+
+  // 재개 봉인이 붙어도 이름공간 밖으로 나가지 않는다 (유휴 시계까지 포함해서).
+  await persist.armResume(s, TOKENS(), key);
+  assert.deepEqual([...store.keys()].sort(), ["axe-vault.activity", "axe-vault.session"]);
+  assert.equal(persist.ACTIVITY_KEY, "axe-vault.activity");
 });
 
 test("src 어디에도 localStorage 쓰기·읽기가 없다 (레거시 제거만 허용)", () => {
@@ -154,8 +223,10 @@ test("로그아웃 — 저장분 잔존 0", () => {
 // ------------------------------------------ 저장 페이로드 스키마 (핵심 회귀 방어)
 
 test("저장 페이로드는 허용 필드가 전부다", () => {
+  assert.deepEqual([...persist.SESSION_FIELDS], [...SEALLESS_FIELDS, "resume"], "허용 목록이 바뀌었다");
   persist.saveSession(FACTS(), TOKENS(), userKey());
-  assert.deepEqual(Object.keys(JSON.parse(stored())), [...persist.SESSION_FIELDS]);
+  // 잠금 폴백 저장은 재개 봉인을 만들지 않는다 (그건 armResume 의 몫이다).
+  assert.deepEqual(Object.keys(JSON.parse(stored())), SEALLESS_FIELDS);
 });
 
 test("잠긴 탭의 저장분에 평문 토큰이 없다 — 토큰은 유저키 봉인 안에만 있다", () => {
@@ -203,7 +274,7 @@ test("평문 키·마스터 패스워드는 저장 페이로드에 절대 들어
   );
 
   const raw = stored();
-  assert.deepEqual(Object.keys(JSON.parse(raw)), [...persist.SESSION_FIELDS]);
+  assert.deepEqual(Object.keys(JSON.parse(raw)), SEALLESS_FIELDS);
   for (const forbidden of [MASTER_PASSWORD, PLAINTEXT_USER_KEY, AUTH_HASH, "평문 이름", "masterKey", "authHash", "userKey", "orgKeys", "sync"]) {
     assert.ok(!raw.includes(forbidden), `저장 페이로드에 ${forbidden} 이 새어 나갔다`);
   }
@@ -259,7 +330,7 @@ test("채택 — 저장까지 성공해야 키와 인덱스를 돌려준다", ()
   assert.equal(adoption.keys.userKey, key);
   assert.ok(adoption.keys.userKey.some((b) => b !== 0), "성공 경로에서 키를 지우면 안 된다");
   assert.equal(adoption.data.items.length, 0);
-  assert.deepEqual(Object.keys(JSON.parse(stored())), [...persist.SESSION_FIELDS]);
+  assert.deepEqual(Object.keys(JSON.parse(stored())), SEALLESS_FIELDS);
 });
 
 test("저장이 실패하면 새로 유도한 키는 남지 않는다 (반쯤 채택된 상태 금지)", () => {
@@ -649,6 +720,220 @@ test("서버가 세션을 거부하면(401·invalid_grant) 저장분을 버리�
     assert.equal(persist.restoreFailurePhase(rejection), "login");
     assert.equal(stored(), undefined, "죽은 세션을 들고 있을 이유가 없다");
   }
+});
+
+// ------------------------------------------------ 재개 봉인 (새로고침 = 이어가기)
+
+/**
+ * 새로고침이 잠금 화면이 아니라 **쓰던 금고 화면**으로 돌아오게 하는 계층.
+ *
+ * 여기서 고정하는 것은 편의가 아니라 **그 편의의 한도**다: 봉인은 랩 키(브라우저가 들고 있고
+ * JS 가 꺼낼 수 없는 CryptoKey)와 짝일 때만 열리고, 유휴 15분·수동 잠금·로그아웃·탭 닫기 중
+ * 하나라도 일어나면 사라져야 한다. 하나라도 새면 "잠금" 이라는 말이 거짓이 된다.
+ */
+const armed = async (key = userKey(), tokens = TOKENS()) => {
+  const s = persist.saveSession(FACTS(), tokens, key);
+  const next = await persist.armResume(s, tokens, key);
+  assert.ok(next?.resume, "봉인이 만들어지지 않았다");
+  return { key, stored: next };
+};
+
+test("새로고침 — 봉인이 살아 있으면 잠금이 아니라 이어가기로 부팅한다", async () => {
+  const key = userKey();
+  const s = persist.saveSession(FACTS(), TOKENS(), key);
+  assert.equal(persist.restoreSession().phase, "locked", "봉인 전에는 잠금이 맞다");
+
+  await persist.armResume(s, TOKENS(), key);
+
+  // 새로고침 = 같은 sessionStorage·같은 IndexedDB 를 다시 읽는 것.
+  const boot = persist.restoreSession();
+  assert.equal(boot.phase, "resuming");
+
+  const payload = await persist.takeResume(boot.session);
+  assert.deepEqual([...payload.userKey], [...key], "유저키가 봉인을 그대로 통과해야 한다");
+  assert.deepEqual(payload.tokens, TOKENS());
+
+  // 그 재료로 곧바로 채택된다 — 마스터 패스워드를 한 번도 묻지 않고 금고 화면으로 간다.
+  const adoption = session.prepareAdoption(RAW_SYNC(), FACTS(), payload.tokens, payload.userKey);
+  assert.equal(adoption.data.items.length, 0);
+  assert.equal(session.staleSessionMetadata(RAW_SYNC(), FACTS()), false);
+});
+
+test("유휴 15분이 지난 새로고침은 이어가지 않는다 — 봉인을 걷고 잠금으로", async () => {
+  const { key } = await armed();
+  assert.equal(persist.restoreSession().phase, "resuming");
+
+  // 방치. 유휴 타이머는 새로고침으로 사라지므로 **이 부팅 검사가 유일한 방어**다.
+  const boot = persist.restoreSession(Date.now() + persist.IDLE_LOCK_MS + 1);
+  assert.equal(boot.phase, "locked");
+  assert.equal(boot.session.resume, undefined, "만료된 봉인이 저장분에 남았다");
+  assert.equal(store.get("axe-vault.activity"), undefined, "만료된 유휴 시계가 남았다");
+
+  // 잠금 폴백은 그대로다 — 마스터 패스워드로 열 수 있어야 한다.
+  assert.deepEqual(persist.unsealTokens(persist.loadSession(), key), TOKENS());
+  // 그리고 부팅의 고아 청소가 랩 키까지 지운다 (암호문이 없으니 열 것이 없다).
+  await persist.dropResume();
+  assert.equal(await persist.getWrapKey(), null);
+});
+
+test("암호문 없는 랩 키는 부팅에서 고아로 지운다 (탭을 닫았다 돌아온 경우)", async () => {
+  await armed();
+  assert.ok(await persist.getWrapKey());
+
+  // 탭 닫기 = 브라우저가 sessionStorage 를 지운다. IndexedDB 는 남는다.
+  store.clear();
+  assert.equal(persist.restoreSession().phase, "login");
+
+  await persist.dropResume();
+  assert.equal(await persist.getWrapKey(), null, "열 것이 없는 랩 키가 남았다");
+});
+
+test("로그아웃 — sessionStorage 도 IndexedDB 도 잔존 0", async () => {
+  await armed();
+  assert.ok(store.size > 0 && (await persist.getWrapKey()));
+
+  persist.clearSession();
+  await persist.dropResume();
+
+  assert.equal(store.size, 0);
+  assert.equal(await persist.getWrapKey(), null);
+  assert.equal(persist.restoreSession().phase, "login");
+});
+
+test("잠금 — 재개 봉인만 폐기하고 잠금 폴백은 남긴다", async () => {
+  const { key } = await armed();
+  await persist.dropResume();
+
+  assert.equal(await persist.getWrapKey(), null);
+  const left = persist.loadSession();
+  assert.equal(left.resume, undefined);
+  assert.equal(persist.restoreSession().phase, "locked", "잠갔는데 새로고침이 다시 열면 잠금이 아니다");
+  assert.deepEqual(persist.unsealTokens(left, key), TOKENS(), "폴백까지 지웠다면 그건 로그아웃이다");
+});
+
+test("언랩 실패는 이어가지 않고 잠금으로 폴백한다 (랩 키 없음·다른 랩 키·암호문 변조)", async () => {
+  const first = await armed();
+
+  // (1) 랩 키만 사라진 경우 (프로필 정리·저장소 축출)
+  await persist.deleteWrapKey();
+  assert.equal(await persist.takeResume(first.stored), null);
+
+  // (2) 다른 세션의 랩 키로는 열리지 않는다 — 봉인마다 새 랩 키를 만든다.
+  const second = await armed();
+  assert.equal(await persist.takeResume(first.stored), null, "옛 봉인이 새 랩 키로 열렸다");
+
+  // (3) 암호문이 한 바이트라도 어긋나면 AES-GCM 이 거절한다 (인증 암호).
+  const tampered = { ...second.stored, resume: { ...second.stored.resume, ct: flip(second.stored.resume.ct) } };
+  assert.equal(await persist.takeResume(tampered), null);
+  const ivTampered = { ...second.stored, resume: { ...second.stored.resume, iv: flip(second.stored.resume.iv) } };
+  assert.equal(await persist.takeResume(ivTampered), null);
+
+  // 어느 경우든 마스터 패스워드 경로는 멀쩡하다.
+  assert.deepEqual(persist.unsealTokens(persist.loadSession(), second.key), TOKENS());
+});
+
+const flip = (b64) => (b64[0] === "A" ? "B" : "A") + b64.slice(1);
+
+test("IndexedDB 가 없거나 막혀도 크래시 없이 잠금 동작으로 폴백한다", async () => {
+  const key = userKey();
+  const s = persist.saveSession(FACTS(), TOKENS(), key);
+
+  const broken = [
+    undefined, // 지원하지 않는 환경
+    {
+      open() {
+        throw new DOMException("The operation is insecure.", "SecurityError"); // 정책·프라이빗 모드
+      },
+    },
+    {
+      open() {
+        const req = {};
+        setTimeout(() => req.onerror?.(), 0); // 열기 실패
+        return req;
+      },
+    },
+  ];
+
+  for (const idb of broken) {
+    globalThis.indexedDB = idb;
+    assert.equal(await persist.armResume(s, TOKENS(), key), null, "봉인 못 하면 null 이어야 한다 (예외 아님)");
+    assert.equal(persist.loadSession().resume, undefined, "열지 못할 봉인을 저장분에 남겼다");
+    assert.equal(persist.restoreSession().phase, "locked", "저장소가 막혔다고 부팅이 죽으면 안 된다");
+    assert.equal(await persist.takeResume({ ...s, resume: { ct: "AAAA", iv: "AAAA" } }), null);
+    await assert.doesNotReject(() => persist.dropResume());
+  }
+
+  // 잠금 폴백은 그대로 — 마스터 패스워드로 여는 길은 IndexedDB 와 무관하다.
+  assert.deepEqual(persist.unsealTokens(persist.loadSession(), key), TOKENS());
+});
+
+test("랩 키는 꺼낼 수 없다 — 저장소를 통째로 떠도 열쇠 바이트가 나오지 않는다", async () => {
+  await armed();
+  const wrap = await persist.getWrapKey();
+
+  assert.equal(wrap.extractable, false, "extractable 랩 키는 이 설계의 전제를 깬다");
+  await assert.rejects(() => crypto.subtle.exportKey("raw", wrap), "랩 키가 export 됐다");
+  await assert.rejects(() => crypto.subtle.exportKey("jwk", wrap));
+});
+
+test("재개 봉인 밖으로 유저키·토큰이 새지 않는다", async () => {
+  const key = userKey();
+  await persist.armResume(persist.saveSession(FACTS(), TOKENS(), key), TOKENS(), key);
+
+  const raw = dump();
+  const plainUserKey = btoa(String.fromCharCode(...key));
+  for (const forbidden of [ACCESS_TOKEN, REFRESH_TOKEN, plainUserKey, "accessToken", "refreshToken", "userKey"]) {
+    assert.ok(!raw.includes(forbidden), `재개 봉인 밖으로 ${forbidden.slice(0, 24)} 가 새어 나갔다`);
+  }
+  // 봉인은 base64 두 조각뿐이고, 그 둘만으로는 아무것도 열리지 않는다 (랩 키가 있어야 한다).
+  const seal = JSON.parse(stored()).resume;
+  assert.deepEqual(Object.keys(seal).sort(), ["ct", "iv"]);
+  assert.match(seal.iv, /^[A-Za-z0-9+/]+={0,2}$/);
+});
+
+test("봉인 도중 잠금이 끼어들면 봉인도 랩 키도 남지 않는다", async () => {
+  const key = userKey();
+  const s = persist.saveSession(FACTS(), TOKENS(), key);
+
+  // (a) 평문을 만들기도 전에 잠긴 경우. 이 확인이 없으면 **0으로 덮어쓴 유저키**가 봉인돼
+  //     다음 새로고침이 "열렸는데 아무것도 못 푸는" 금고가 된다.
+  assert.equal(await persist.armResume(s, TOKENS(), key, () => false), null);
+  assert.equal(await persist.getWrapKey(), null, "쓰지 않을 랩 키를 남겼다");
+  assert.equal(persist.loadSession().resume, undefined);
+
+  // (b) 봉인은 끝났는데 저장 직전에 잠긴 경우 — 두 번째 확인이 잡는다.
+  let checks = 0;
+  assert.equal(await persist.armResume(s, TOKENS(), key, () => ++checks === 1), null);
+  assert.equal(checks, 2, "확인은 두 번이어야 한다 (평문 직전 + 쓰기 직전)");
+  assert.equal(await persist.getWrapKey(), null);
+  assert.equal(persist.loadSession().resume, undefined);
+  assert.equal(persist.restoreSession().phase, "locked");
+});
+
+test("유휴 시계 — 표식이 없거나 읽을 수 없으면 만료로 본다", () => {
+  const t0 = 1_700_000_000_000;
+  assert.equal(persist.idleExpired(t0), true, "표식 없는 봉인 = 언제부터 방치됐는지 모르는 봉인");
+
+  persist.markActivity(t0);
+  assert.equal(persist.idleExpired(t0 + persist.IDLE_LOCK_MS - 1), false);
+  assert.equal(persist.idleExpired(t0 + persist.IDLE_LOCK_MS), true, "한도에 닿으면 만료다");
+  assert.equal(persist.IDLE_LOCK_MS, session.IDLE_LOCK_MS, "유휴 한도는 앱 전체에서 한 숫자여야 한다");
+
+  store.set("axe-vault.activity", "어제쯤");
+  assert.equal(persist.idleExpired(t0), true);
+});
+
+test("토큰이 회전되면 봉인도 회전분으로 다시 걸린다 (죽은 토큰을 이어가지 않는다)", async () => {
+  const key = userKey();
+  const first = await armed(key, TOKENS());
+
+  const rotated = { accessToken: ROTATED_ACCESS, refreshToken: ROTATED_REFRESH };
+  // 회전은 항상 채택(saveSession → armResume)으로 끝난다 — 그 순서를 그대로 재현한다.
+  const saved = persist.saveSession(FACTS(), rotated, key);
+  const next = await persist.armResume(saved, rotated, key);
+
+  assert.deepEqual((await persist.takeResume(next)).tokens, rotated);
+  assert.equal(await persist.takeResume(first.stored), null, "옛 봉인이 아직 열린다 = 죽은 토큰이 살아 있다");
 });
 
 test("네트워크 실패는 세션을 버리지 않는다 — 잠금 화면에 남아 다시 시도한다", () => {

@@ -203,13 +203,18 @@ export const ssoFlowStart = (handoff: SsoHandoff | null): SsoFlow => ({ handoff,
 
 const RETIRED: SsoFlow = { handoff: null, authenticated: false };
 
-export function ssoFlowStep(flow: SsoFlow, phase: "login" | "locked" | "unlocked" | "sso-pending"): SsoFlow {
+export function ssoFlowStep(
+  flow: SsoFlow,
+  phase: "login" | "locked" | "unlocked" | "sso-pending" | "resuming",
+): SsoFlow {
   if (!flow.handoff) return flow;
   // 금고가 열렸다 — 도착 흐름은 여기서 끝난다. 이후의 유휴 잠금이 SSO 화면을 되살리지 않는다.
   if (phase === "unlocked") return RETIRED;
   // 인증까지 끝났고 잠금해제를 기다린다. (SSO 도착 직후는 "sso-pending" — 평문 토큰을 시한부로
-  // 들고 있는 구간이라 세션이 별도 상태로 가른다. 이 흐름에서는 둘 다 "인증 완료" 로 읽는다.)
-  if (phase === "locked" || phase === "sso-pending") {
+  // 들고 있는 구간이라 세션이 별도 상태로 가른다. 이 흐름에서는 둘 다 "인증 완료" 로 읽는다.
+  // "resuming" 은 이 흐름과 겹치지 않는다 — 새 SSO 인증이 도착하면 main.tsx 가 저장분을
+  // 지우므로 재개 봉인이 남지 않는다. 겹치더라도 잠금해제 대기와 같게 읽으면 안전하다.)
+  if (phase === "locked" || phase === "sso-pending" || phase === "resuming") {
     return flow.authenticated ? flow : { ...flow, authenticated: true };
   }
   // phase === "login": 인증까지 갔다가 돌아왔다면 로그아웃이다.

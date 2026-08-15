@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useSession, type Phase } from "./lib/session.ts";
 import { ssoFlowStart, ssoFlowStep, type SsoFlow, type SsoHandoff } from "./lib/sso.ts";
-import { LockScreen, LoginScreen, SsoScreen } from "./ui/AuthScreens.tsx";
+import { LockScreen, LoginScreen, ResumeScreen, SsoScreen } from "./ui/AuthScreens.tsx";
 import { VaultScreen } from "./ui/VaultScreen.tsx";
 
 export default function App({ ssoHandoff }: { ssoHandoff: SsoHandoff | null }) {
@@ -28,6 +28,13 @@ export default function App({ ssoHandoff }: { ssoHandoff: SsoHandoff | null }) {
         onLogout={session.logout}
       />
     );
+  }
+
+  // 새로고침 직후 봉인을 푸는 구간. 잠금 화면을 스쳐 보이면 필요 없는 마스터 패스워드를
+  // 넣으려 들게 되므로, 이 짧은 구간만 따로 그린다 (실패하면 아래 잠금 화면으로 떨어진다).
+  if (session.phase === "resuming") {
+    // `lock` = 이어가기 포기 (진행 중 왕복 중단 + 봉인 폐기 + 잠금 화면).
+    return <ResumeScreen email={session.email} onCancel={session.lock} />;
   }
 
   // "sso-pending" 도 사람에게는 잠금 화면이다. 다만 이 탭이 아직 아무것도 봉인하지 못한

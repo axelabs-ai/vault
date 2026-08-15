@@ -1,27 +1,49 @@
 /**
- * 탭 세션 보존 — 새로고침이 **로그아웃이 아니라 잠금**이 되게 하는 최소 저장분.
+ * 탭 세션 보존 — 새로고침이 **로그아웃도 잠금도 아니라 "이어가기"** 가 되게 하는 최소 저장분.
  *
  * 저장 규칙의 집행은 이 파일 하나에서만 한다. 다른 어떤 모듈도 세션을 직접 쓰지 않는다.
  *
- *  · **sessionStorage 만** 쓴다. 탭 수명과 정확히 일치한다 — 새로고침은 살아남고, 탭을 닫으면
- *    브라우저가 지운다. localStorage 는 여전히 전면 금지다.
- *  · **평문으로 저장하는 것** = 그것만으로는 아무것도 열 수 없는 값뿐이다: 계정 이메일(=KDF
- *    salt 겸 잠금 화면 표시), KDF 파라미터(익명 prelogin 이 누구에게나 알려 주는 값),
- *    그리고 마스터 패스워드로 감싸인 **채로의** 유저키 암호문.
- *  · **세션 토큰은 평문으로 저장하지 않는다.** access/refresh 토큰은 "서버도 가진 값" 이 아니라
- *    **권한 그 자체**다 — 특히 refresh 토큰은 마스터 패스워드 없이 계정 권한을 행사한다. 그래서
- *    유저키로 감싸(`encTokens`) 둔다. 봉인을 푸는 유저키는 마스터 패스워드로만 나오므로,
- *    **잠금 상태의 저장분에는 쓸 수 있는 토큰이 존재하지 않는다.**
- *  · **어디에도 저장하지 않는 것** = 마스터 패스워드, 유도된 마스터키/유저키(평문 대칭키),
- *    복호된 항목 필드, 인증 해시, sync 페이로드.
+ * 저장분은 두 겹이다 — 목적이 다르다.
+ *
+ *  1. **잠금 폴백** (금고를 한 번이라도 연 뒤에는 항상): 계정 이메일·KDF·마스터 패스워드로
+ *     감싸인 **채로의** 유저키 암호문, 그리고 그 유저키로 감싼 세션 토큰(`encTokens`).
+ *     이것만으로는 아무것도 열리지 않는다 — 봉인을 푸는 유저키는 마스터 패스워드에서만
+ *     나오므로 **잠긴 저장분에는 쓸 수 있는 토큰이 존재하지 않는다.**
+ *  2. **재개 봉인** (금고가 열려 있는 동안만, `resume`): 유저키와 토큰을 **랩 키**로 감싼
+ *     암호문. 랩 키는 `generateKey(…, extractable=false, …)` 로 만든 **non-extractable**
+ *     CryptoKey 이고 IndexedDB(`axe-vault` / store `wrap`)에 **객체 그대로** 산다 — 브라우저가
+ *     들고 있을 뿐 JS 는 그 바이트를 꺼낼 수 없다(`exportKey` 가 거부된다). 이 한 겹 덕분에
+ *     새로고침이 마스터 패스워드를 다시 묻지 않고 금고를 그대로 이어간다.
+ *
+ * 재개 봉인이 **사라지는 지점**: 유휴 15분 초과, 수동 잠금, 로그아웃, 복원 직후 감지된 서버
+ * 키 회전. 유휴는 타이머만으로는 부족해 **부팅 시에도 검사한다** — 새로고침이 타이머를
+ * 리셋하면 방치된 탭이 무한히 연장되기 때문이다(그래서 마지막 활동 시각을 함께 저장한다).
+ * 탭을 닫으면 sessionStorage 의 암호문이 사라지고 랩 키만 IndexedDB 에 남는데, 그건 **다음
+ * 부팅이 고아로 보고 즉시 지운다** — 암호문 없는 랩 키는 아무것도 열지 못한다.
+ *
+ * 정직하게, 이 봉인이 막는 것과 못 막는 것:
+ *  · 막는다 — 저장소를 통째로 뜬 덤프(sessionStorage JSON · IndexedDB 익스포트 · 디스크에
+ *    남은 프로필)에서 **쓸 수 있는 열쇠 바이트가 나오지 않는다.** 다른 기기·다른 오리진으로
+ *    옮겨도 열리지 않는다.
+ *  · 못 막는다 — **같은 오리진에서 실행되는 스크립트**는 랩 키를 꺼내지는 못해도 *쓸 수는*
+ *    있다. XSS 는 이 계층이 아니라 CSP·의존성 위생이 막는 문제다.
+ *
+ *  · **sessionStorage 만** 쓴다(랩 키만 IndexedDB — CryptoKey 는 문자열이 아니라 객체로만
+ *    보관할 수 있다). localStorage 는 여전히 전면 금지다.
+ *  · **어디에도 저장하지 않는 것** = 마스터 패스워드, 마스터키, 복호된 항목 필드, 인증 해시,
+ *    sync 페이로드. 유저키는 **봉인 안에서만** 저장분에 닿는다(평문으로는 결코).
  *
  * 그래서 복호 순서가 이렇게 된다:
- *   마스터 패스워드 → 마스터키 → `encUserKey` 복호 → **유저키** → `encTokens` 복호 → 토큰 → sync
+ *   · 잠금 해제: 마스터 패스워드 → 마스터키 → `encUserKey` → **유저키** → `encTokens` → 토큰 → sync
+ *   · 이어가기: 랩 키(브라우저 보관) → `resume` → **유저키 + 토큰** → sync
  *
- * 암·복호는 전부 PureCrypto 다 (우리 크립토 0줄 원칙 유지). `serializeSession` 이 저장
- * 페이로드를 만드는 **유일한** 자리이고, 허용 필드를 하나씩 옮겨 담으며 EncString 모양까지
- * 검사한다 — 호출부가 실수로 평문을 얹으면 저장 단계에서 죽는다
- * (tests/session-restore.test.mjs 가 이 회귀를 막는다 — 조용히 새면 눈으로는 못 잡는다).
+ * 암·복호는 PureCrypto(항목·토큰 봉인) 와 WebCrypto AES-GCM(재개 봉인) 이 한다 — 우리 크립토는
+ * 여전히 0줄이다. 재개 봉인만 WebCrypto 인 이유는 PureCrypto 키가 정의상 **꺼낼 수 있는 raw
+ * 바이트**라 이 계층의 목적(꺼낼 수 없음)을 달성할 수 없기 때문이다.
+ *
+ * `serializeSession` 이 저장 페이로드를 만드는 **유일한** 자리이고, 허용 필드를 하나씩 옮겨
+ * 담으며 EncString·base64 모양까지 검사한다 — 호출부가 실수로 평문을 얹으면 저장 단계에서
+ * 죽는다 (tests/session-restore.test.mjs 가 이 회귀를 막는다 — 조용히 새면 눈으로는 못 잡는다).
  */
 import { PureCrypto } from "../sdk.ts";
 import { isAuthRejection } from "./api.ts";
@@ -31,8 +53,21 @@ import type { Kdf } from "../sdk.ts";
 /** 저장 키. 위생 감사에서 한눈에 잡히도록 `axe-vault.` 이름공간을 쓴다. */
 export const SESSION_KEY = "axe-vault.session";
 
+/**
+ * 마지막 활동 시각(ms). 세션 레코드와 따로 두는 이유는 쓰기 빈도다 — 활동 이벤트마다 수 KB 의
+ * 세션 JSON 을 다시 쓰는 대신 숫자 한 줄만 갱신한다.
+ */
+export const ACTIVITY_KEY = "axe-vault.activity";
+
 /** 스키마가 바뀌면 올린다 — 낯선 버전은 로드 단계에서 버려진다(부분 복원 금지). */
-export const SESSION_SCHEMA = 2;
+export const SESSION_SCHEMA = 3;
+
+/**
+ * 유휴 자동 잠금 한도. **저장 계층이 이 숫자를 안다** — 새로고침을 넘겨 이어갈지 말지가
+ * 부팅 시점의 이 판정에 달려 있기 때문이다(타이머는 새로고침으로 리셋되므로 그것만 믿으면
+ * 방치된 탭이 무한 연장된다). session.ts 가 같은 상수를 재-export 한다.
+ */
+export const IDLE_LOCK_MS = 15 * 60 * 1000;
 
 /**
  * 잠금 상태에서도 들고 있어도 되는 사실. 전부 서버가 아는 값이고, 이것만으로는 아무것도 못 연다.
@@ -45,20 +80,36 @@ export interface SessionFacts {
   encUserKey: string;
 }
 
+/**
+ * 재개 봉인 — 랩 키(IndexedDB 의 non-extractable CryptoKey)로 감싼 AES-GCM 암호문.
+ * 이 값만 훔쳐도 열리지 않고, 랩 키만 훔쳐도(꺼낼 수 없으니 애초에 못 훔치지만) 열 것이 없다.
+ */
+export interface ResumeSeal {
+  /** base64 AES-GCM 암호문 */
+  ct: string;
+  /** base64 12바이트 IV */
+  iv: string;
+}
+
 export interface StoredSession extends SessionFacts {
   v: number;
   /** 유저키로 감싼 토큰 쌍. 마스터 패스워드 없이는 풀 수 없다. */
   encTokens: string;
+  /** 금고가 열려 있는 동안에만 존재한다. 잠기면 지운다. */
+  resume?: ResumeSeal;
 }
 
-/** 저장 페이로드의 전체 필드. 테스트가 이 목록과 실제 JSON 키를 대조한다. */
-export const SESSION_FIELDS = ["v", "email", "kdf", "encUserKey", "encTokens"] as const;
+/** 저장 페이로드의 허용 필드 전부. 테스트가 이 목록과 실제 JSON 키를 대조한다. */
+export const SESSION_FIELDS = ["v", "email", "kdf", "encUserKey", "encTokens", "resume"] as const;
 
 /**
  * EncString 모양 — `<타입번호>.<본문>` (본문은 base64 조각들을 `|` 로 이은 것).
  * 평문 토큰(JWT 는 `eyJ…`)·바이트배열·JSON 은 이 모양이 아니다. 저장 직전의 마지막 그물이다.
  */
 const ENC_STRING = /^\d+\.[A-Za-z0-9+/=|]+$/;
+
+/** 재개 봉인의 두 조각은 순수 base64 다 (EncString 이 아니다 — 다른 크립토 계층이다). */
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 
 function text(label: string, v: unknown): string {
   if (typeof v !== "string" || !v.trim()) throw new Error(`세션 저장: ${label} 가 비어 있거나 문자열이 아니다`);
@@ -70,6 +121,12 @@ function encString(label: string, v: unknown): string {
   if (!ENC_STRING.test(s)) {
     throw new Error(`세션 저장: ${label} 가 EncString 이 아니다 — 평문을 저장하려는 것 아닌가`);
   }
+  return s;
+}
+
+function base64(label: string, v: unknown): string {
+  const s = text(label, v);
+  if (!BASE64.test(s)) throw new Error(`세션 저장: ${label} 가 base64 가 아니다`);
   return s;
 }
 
@@ -98,18 +155,28 @@ function kdfParams(kdf: unknown): Kdf {
   throw new Error("세션 저장: 알 수 없는 KDF 파라미터");
 }
 
+/** 재개 봉인도 같은 규칙으로 옮겨 담는다 — 딸려 오는 필드 없음, 모양 검사 통과 필수. */
+function resumeSeal(v: unknown): ResumeSeal | undefined {
+  if (v == null) return undefined;
+  const o = v as ResumeSeal;
+  return { ct: base64("resume.ct", o.ct), iv: base64("resume.iv", o.iv) };
+}
+
 /**
  * 저장 페이로드 생성 — 허용 필드만, 하나씩, 검사하며 옮겨 담는다.
  * 입력에 무엇이 더 붙어 있든(평문 토큰·평문 키·sync 원문) 결과에는 오지 못한다.
  */
-function serializeSession(facts: SessionFacts, encTokens: string): StoredSession {
-  return {
+function serializeSession(facts: SessionFacts, encTokens: string, resume?: unknown): StoredSession {
+  const clean: StoredSession = {
     v: SESSION_SCHEMA,
     email: text("email", facts.email),
     kdf: kdfParams(facts.kdf),
     encUserKey: encString("encUserKey", facts.encUserKey),
     encTokens: encString("encTokens", encTokens),
   };
+  const seal = resumeSeal(resume);
+  if (seal) clean.resume = seal;
+  return clean;
 }
 
 /** 토큰 쌍을 유저키로 감싼다. 공식 SDK 대칭 암호화 그대로 — 우리 알고리즘은 0줄이다. */
@@ -133,6 +200,9 @@ export function unsealTokens(stored: StoredSession, userKey: Uint8Array): TokenP
  * 저장. 토큰을 유저키로 감싸므로 **유저키가 손에 있을 때만** 저장할 수 있다 — 즉 금고를 실제로
  * 연 순간에만. (SSO 인증 직후처럼 아직 잠긴 상태에서는 저장하지 않는다. 감쌀 키가 없으니
  * 평문으로 두느니 저장하지 않는 것이 맞다.)
+ *
+ * 재개 봉인은 여기서 만들지 않는다 — 비동기이고 실패해도 앱이 계속 굴러야 하므로 별도 문
+ * (`armResume`)으로 갈랐다. 이 함수의 실패는 채택 원자성이 걸린 예외로 남는다.
  */
 export function saveSession(facts: SessionFacts, tokens: TokenPair, userKey: Uint8Array): StoredSession {
   const clean = serializeSession(facts, sealTokens(tokens, userKey));
@@ -161,6 +231,7 @@ function readRaw(): string | null {
 export function clearSession(): void {
   try {
     sessionStorage.removeItem(SESSION_KEY);
+    sessionStorage.removeItem(ACTIVITY_KEY);
   } catch (e) {
     // 여기서 던지면 호출부(logout·forget)의 zeroize·phase 전이가 통째로 멈춘다. 그게 더 나쁘다.
     console.warn("axe-vault: 세션 저장분을 지우지 못했다 (저장소 접근 실패)", e);
@@ -174,23 +245,287 @@ export function loadSession(): StoredSession | null {
   try {
     const parsed = JSON.parse(raw) as StoredSession;
     if (parsed?.v !== SESSION_SCHEMA) throw new Error(`알 수 없는 스키마 버전: ${parsed?.v}`);
-    return serializeSession(parsed, parsed.encTokens);
+    return serializeSession(parsed, parsed.encTokens, parsed.resume);
   } catch {
     clearSession();
     return null;
   }
 }
 
+// ------------------------------------------------------------------ 유휴 시계
+
+/**
+ * 마지막 활동 시각을 새긴다. 유휴 잠금 타이머와 **같은 사건**에 매달아 둬야 의미가 있다
+ * (session.ts 의 activity 리스너 + 채택 직후).
+ */
+export function markActivity(now = Date.now()): void {
+  try {
+    sessionStorage.setItem(ACTIVITY_KEY, String(now));
+  } catch {
+    /* 저장소가 막힌 환경 — 이어가기를 못 할 뿐, 앱은 그대로 돈다 */
+  }
+}
+
+/**
+ * 마지막 활동으로부터 유휴 한도를 넘겼는가.
+ *
+ * **표식이 없으면 넘긴 것으로 본다.** 재개 봉인은 표식과 함께만 쓰이므로(armResume 이 둘을
+ * 같이 쓴다), 표식이 사라진 봉인은 "언제부터 방치됐는지 알 수 없는" 봉인이고 그건 폐기 사유다.
+ */
+export function idleExpired(now = Date.now()): boolean {
+  let raw: string | null = null;
+  try {
+    raw = sessionStorage.getItem(ACTIVITY_KEY);
+  } catch {
+    return true;
+  }
+  const at = Number(raw);
+  return !raw || !Number.isFinite(at) || now - at >= IDLE_LOCK_MS;
+}
+
+// --------------------------------------------------- 랩 키 (IndexedDB · non-extractable)
+
+const DB_NAME = "axe-vault";
+const WRAP_STORE = "wrap";
+const WRAP_ID = "session";
+const WRAP_ALG = "AES-GCM";
+const IV_BYTES = 12;
+
+type TxResult<T> = { ok: true; value: T | undefined } | { ok: false };
+
+/**
+ * IndexedDB 는 **있다고 가정하지 않는다** — 프라이빗 모드·기업 정책·구형 환경에서 없거나
+ * 막힌다. 없으면 재개가 없을 뿐이고 앱은 잠금 폴백으로 정상 동작해야 한다. 그래서 이 계층의
+ * 모든 실패는 예외가 아니라 `null`/`false` 다.
+ */
+function openDb(): Promise<IDBDatabase | null> {
+  return new Promise((resolve) => {
+    let req: IDBOpenDBRequest;
+    try {
+      if (typeof indexedDB === "undefined" || !indexedDB) return resolve(null);
+      req = indexedDB.open(DB_NAME, 1);
+    } catch {
+      return resolve(null);
+    }
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(WRAP_STORE)) db.createObjectStore(WRAP_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+    req.onblocked = () => resolve(null);
+  });
+}
+
+/**
+ * 한 건짜리 트랜잭션. **완료(oncomplete)에서 결과를 낸다** — 요청 성공은 커밋을 뜻하지 않아서다.
+ * 특히 삭제는 폐기 지점이라 "요청은 성공했는데 트랜잭션이 abort 됐다" 를 성공으로 읽으면
+ * 조용히 지워지지 않은 랩 키가 남는다.
+ */
+async function wrapTx<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest): Promise<TxResult<T>> {
+  const db = await openDb();
+  if (!db) return { ok: false };
+  try {
+    return await new Promise<TxResult<T>>((resolve) => {
+      try {
+        const tx = db.transaction(WRAP_STORE, mode);
+        const req = run(tx.objectStore(WRAP_STORE));
+        tx.oncomplete = () => resolve({ ok: true, value: req.result as T });
+        tx.onerror = () => resolve({ ok: false });
+        tx.onabort = () => resolve({ ok: false });
+      } catch {
+        resolve({ ok: false });
+      }
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function putWrapKey(key: CryptoKey): Promise<boolean> {
+  return (await wrapTx("readwrite", (s) => s.put(key, WRAP_ID))).ok;
+}
+
+export async function getWrapKey(): Promise<CryptoKey | null> {
+  const r = await wrapTx<CryptoKey>("readonly", (s) => s.get(WRAP_ID));
+  return r.ok ? r.value ?? null : null;
+}
+
+/** 폐기. 실패해도 던지지 않는다 — 호출부(잠금·로그아웃)의 나머지 폐기가 멈추면 더 나쁘다. */
+export async function deleteWrapKey(): Promise<void> {
+  await wrapTx("readwrite", (s) => s.delete(WRAP_ID));
+}
+
+// ------------------------------------------------------------------ 재개 봉인
+
+const b64 = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes));
+const unb64 = (s: string): Uint8Array<ArrayBuffer> => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+
+/** 봉인이 되돌려 주는 것 — 새로고침을 넘긴 금고를 다시 여는 데 필요한 전부. */
+export interface ResumePayload {
+  userKey: Uint8Array;
+  tokens: TokenPair;
+}
+
+/**
+ * 재개 봉인을 만든다 — 랩 키 생성 → IndexedDB 보관 → 유저키·토큰 봉인 → 저장분에 기록.
+ *
+ * `live()` = "지금 봉인하려는 유저키가 아직 설치된 그 키인가". 잠금은 세션 정체성(epoch)을
+ * 올리지 않고 **키만 zeroize** 하므로 epoch 대조로는 못 잡는다 — 봉인 도중 잠금이 끼어들면
+ * **0으로 채워진 유저키가 봉인돼** 다음 새로고침이 "열렸지만 아무것도 못 푸는" 금고가 된다.
+ * 그래서 (a) 평문을 만들기 직전과 (b) 저장분에 쓰기 직전, 두 번 확인하고 어긋나면 랩 키까지
+ * 도로 지운다. 두 확인과 그 다음 동작 사이에는 await 가 없어 단일 스레드에서 원자적이다.
+ *
+ * 실패는 전부 `null` 이다 — 재개는 **있으면 좋은 것**이고, 없으면 마스터 패스워드 경로로
+ * 돌아갈 뿐이다. 이 함수의 어떤 실패도 열려 있는 금고를 방해하지 않는다.
+ */
+export async function armResume(
+  stored: StoredSession,
+  tokens: TokenPair,
+  userKey: Uint8Array,
+  live: () => boolean = () => true,
+): Promise<StoredSession | null> {
+  if (typeof crypto === "undefined" || !crypto?.subtle) return null;
+
+  let key: CryptoKey;
+  try {
+    // non-extractable — 이 앱도, 이 오리진의 어떤 스크립트도 raw 바이트를 꺼낼 수 없다.
+    key = await crypto.subtle.generateKey({ name: WRAP_ALG, length: 256 }, false, ["encrypt", "decrypt"]);
+  } catch {
+    return null;
+  }
+  if (!(await putWrapKey(key))) return null;
+
+  const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  let sealed: ArrayBuffer;
+  let plain: Uint8Array<ArrayBuffer>;
+  try {
+    // (a) 확인 직후 평문을 만든다 — 사이에 await 가 없어야 zeroize 된 키를 봉인하지 않는다.
+    if (!live()) {
+      await deleteWrapKey();
+      return null;
+    }
+    plain = new TextEncoder().encode(
+      JSON.stringify({
+        userKey: b64(userKey),
+        accessToken: text("accessToken", tokens.accessToken),
+        refreshToken: tokens.refreshToken ?? null,
+      }),
+    );
+    sealed = await crypto.subtle.encrypt({ name: WRAP_ALG, iv }, key, plain);
+  } catch {
+    await deleteWrapKey();
+    return null;
+  }
+  // 봉인 재료는 즉시 덮어쓴다. (JSON 문자열 자체는 zeroize 할 수 없다 — 이 파일 머리의 한계.)
+  plain.fill(0);
+
+  // (b) 쓰기 직전 마지막 확인.
+  if (!live()) {
+    await deleteWrapKey();
+    return null;
+  }
+  try {
+    const next = serializeSession(stored, stored.encTokens, {
+      ct: b64(new Uint8Array(sealed)),
+      iv: b64(iv),
+    });
+    // 봉인과 유휴 시계는 한 몸이다 — 시계 없는 봉인은 곧바로 만료로 읽힌다(idleExpired).
+    markActivity();
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(next));
+    return next;
+  } catch {
+    await deleteWrapKey();
+    return null;
+  }
+}
+
+/**
+ * 봉인 해제 — 랩 키와 암호문이 **둘 다** 있어야 한다. 하나라도 없거나 어긋나면 `null` 이고,
+ * 호출부는 기존 잠금 화면(마스터 패스워드) 경로로 폴백한다.
+ */
+export async function takeResume(stored: StoredSession): Promise<ResumePayload | null> {
+  const seal = stored.resume;
+  if (!seal || typeof crypto === "undefined" || !crypto?.subtle) return null;
+  const key = await getWrapKey();
+  if (!key) return null;
+
+  let plain: Uint8Array | null = null;
+  try {
+    plain = new Uint8Array(await crypto.subtle.decrypt({ name: WRAP_ALG, iv: unb64(seal.iv) }, key, unb64(seal.ct)));
+    const o = JSON.parse(new TextDecoder().decode(plain)) as {
+      userKey: string;
+      accessToken: string;
+      refreshToken: string | null;
+    };
+    return {
+      userKey: unb64(base64("resume.userKey", o.userKey)),
+      tokens: {
+        accessToken: text("accessToken", o.accessToken),
+        refreshToken: o.refreshToken == null ? null : text("refreshToken", o.refreshToken),
+      },
+    };
+  } catch {
+    return null;
+  } finally {
+    plain?.fill(0);
+  }
+}
+
+/**
+ * 저장분에서 재개 봉인과 유휴 시계만 걷어낸다 — **세션 자체는 남는다**(잠금 화면이 그것으로
+ * 선다). 동기 함수인 이유는 잠금·로그아웃의 화면 전이가 이것을 기다리면 안 되기 때문이다.
+ */
+export function clearResumeSeal(): void {
+  try {
+    const raw = readRaw();
+    if (raw) {
+      const parsed = JSON.parse(raw) as StoredSession;
+      if (parsed?.resume) {
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify(serializeSession(parsed, parsed.encTokens)));
+      }
+    }
+    sessionStorage.removeItem(ACTIVITY_KEY);
+  } catch (e) {
+    console.warn("axe-vault: 재개 봉인을 지우지 못했다 (저장소 접근 실패)", e);
+  }
+}
+
+/**
+ * 재개 폐기 — 암호문(sessionStorage)과 랩 키(IndexedDB)를 함께 없앤다.
+ *
+ * 부팅의 **고아 청소**도 이 함수다: 탭을 닫으면 sessionStorage 는 사라지지만 IndexedDB 는
+ * 남으므로, 암호문 없는 랩 키가 발견되면 그 자리에서 지운다(그 키로는 열 것이 없다).
+ */
+export async function dropResume(): Promise<void> {
+  clearResumeSeal();
+  await deleteWrapKey();
+}
+
 export interface Restored {
-  /** 저장된 세션이 있으면 로그인이 아니라 **잠금**에서 시작한다. */
-  phase: "login" | "locked";
+  /**
+   * 저장분이 없으면 로그인, 있으면 잠금, **재개 봉인까지 살아 있으면 이어가기**.
+   * "resuming" 은 화면이 아니라 약속이다 — 부팅이 랩 키로 봉인을 풀어 보고, 실패하면 잠금이 된다.
+   */
+  phase: "login" | "locked" | "resuming";
   session: StoredSession | null;
 }
 
-/** 부팅 1회. "새로고침 = 잠금 화면" 이라는 규칙이 사는 자리. */
-export function restoreSession(): Restored {
+/**
+ * 부팅 1회. "새로고침 = 이어가기" 라는 규칙이 사는 자리이고, 동시에 **그 규칙의 한도**가 사는
+ * 자리다: 유휴 한도를 넘긴 봉인은 여기서 걷어낸다. 타이머는 새로고침으로 리셋되므로 부팅
+ * 검사가 없으면 방치된 탭이 새로고침만으로 무한 연장된다.
+ */
+export function restoreSession(now = Date.now()): Restored {
   const session = loadSession();
-  return { phase: session ? "locked" : "login", session };
+  if (!session) return { phase: "login", session: null };
+  if (!session.resume) return { phase: "locked", session };
+  if (idleExpired(now)) {
+    // 랩 키는 부팅 직후의 고아 청소(dropResume)가 지운다 — 그쪽이 비동기라 여기서 기다리지 않는다.
+    clearResumeSeal();
+    return { phase: "locked", session: loadSession() };
+  }
+  return { phase: "resuming", session };
 }
 
 /**

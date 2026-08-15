@@ -81,11 +81,11 @@ function AuthShell({
           <li>
             <span className="axe-pattern-auth__trust-index">01</span>
             <span>
-              <strong lang="en">Keys in memory only</strong> 마스터 패스워드와 복호 키는 메모리에만
-              둡니다.{" "}
+              <strong lang="en">Keys the page can't read</strong> 마스터 패스워드와 복호 키는 이 탭
+              메모리에 있습니다.{" "}
               {pending
                 ? "지금은 SSO 인증 결과를 이 탭 메모리에만 들고 있고, 저장된 것은 아직 없습니다 — 마스터 패스워드를 넣으면 그때 세션이 봉인돼 저장됩니다."
-                : "이 탭에 남는 것은 암호문뿐입니다 — 유저키는 마스터 패스워드로, 세션 토큰은 그 유저키로 감싸여 있어 잠긴 탭에는 쓸 수 있는 것이 없습니다. 탭을 닫으면 그마저 사라집니다."}
+                : "새로고침을 넘기기 위해 키 하나를 브라우저가 대신 보관하는데, 그 키는 꺼낼 수 없는 형태(non-extractable)라 저장소를 통째로 떠도 열쇠 바이트는 나오지 않습니다. 나머지 저장분은 전부 암호문입니다."}
             </span>
           </li>
           <li>
@@ -98,8 +98,9 @@ function AuthShell({
                 </>
               ) : (
                 <>
-                  <strong lang="en">Idle lock</strong> 15분간 조작이 없으면 메모리의 키를 폐기합니다.
-                  새로고침도 같은 잠금 상태로 돌아오므로, 마스터 패스워드만 다시 넣으면 이어집니다.
+                  <strong lang="en">Idle lock</strong> 15분간 조작이 없으면 메모리의 키도 브라우저가
+                  보관하던 키도 폐기합니다. 탭을 닫거나 로그아웃해도 같습니다. 그 안에서의
+                  새로고침만 쓰던 금고 화면 그대로 이어집니다.
                 </>
               )}
             </span>
@@ -397,7 +398,7 @@ export function LockScreen({ email, onUnlock, onLogout, heading, lead, pending }
           <p className="axe-form-field__hint">
             {pending
               ? "마스터 패스워드는 서버로 전송되지 않습니다. 지금은 인증 결과만 이 탭 메모리에 있고 아직 아무것도 저장되지 않았습니다 — 마스터 패스워드를 넣어야 세션이 봉인돼 저장됩니다. 새로고침하거나 15분이 지나면 SSO 부터 다시 합니다."
-              : "마스터 패스워드는 서버로 전송되지 않습니다 — 이 탭에 남은 암호문을 여기서 다시 풀 뿐입니다. 새로고침해도 이 화면으로 돌아오니, 마스터 패스워드만 다시 넣으면 됩니다."}
+              : "마스터 패스워드는 서버로 전송되지 않습니다 — 이 탭에 남은 암호문을 여기서 다시 풀 뿐입니다. 이 화면은 세션이 실제로 잠겼을 때만 뜹니다(유휴 15분 초과·수동 잠금·이어가기 실패). 잠기지 않은 새로고침은 묻지 않고 그대로 이어집니다."}
           </p>
         </div>
 
@@ -416,6 +417,40 @@ export function LockScreen({ email, onUnlock, onLogout, heading, lead, pending }
       <p className="axe-pattern-auth__privacy">
         다른 계정으로 들어가려면 <button className="axe-btn axe-btn--ghost axe-btn--sm" type="button" onClick={onLogout}>로그아웃</button> 후 다시 로그인하세요. 로그아웃은 이 탭에 남은 암호문과 토큰까지 지웁니다.
       </p>
+    </AuthShell>
+  );
+}
+
+/**
+ * 이어가기 화면 — 새로고침 직후 봉인을 푸는 짧은 구간.
+ *
+ * 여기서 잠금 화면을 스쳐 보이면 사용자는 마스터 패스워드를 넣으려 든다. 사실은 넣을 필요가
+ * 없으므로 그 사실만 말하고 기다린다. 실패하면 곧바로 진짜 잠금 화면이 대신 선다.
+ *
+ * `onCancel` = 기다리지 않고 마스터 패스워드로 열기. 서버 왕복에는 시한이 없으므로(이 앱의
+ * fetch 는 어디에도 타임아웃이 없다) 출구가 하나는 있어야 한다 — 없으면 응답 없는 서버가
+ * 이 화면을 막다른 길로 만든다.
+ */
+export function ResumeScreen({ email, onCancel }: { email: string; onCancel: () => void }) {
+  return (
+    <AuthShell
+      heading="쓰던 금고를 이어갑니다"
+      lead={
+        email
+          ? `${email} · 잠기지 않은 세션이라 마스터 패스워드가 필요 없습니다.`
+          : "잠기지 않은 세션이라 마스터 패스워드가 필요 없습니다."
+      }
+    >
+      <div className="axe-pattern-auth__form">
+        <StatusBanner
+          tone="info"
+          title="봉인을 푸는 중…"
+          description="브라우저가 보관하던 키로 이 탭의 세션을 되열고, 서버에서 최신 암호문을 받아 옵니다."
+        />
+        <button className="axe-btn axe-btn--secondary axe-btn--lg axe-pattern-auth__email-action" type="button" onClick={onCancel}>
+          기다리지 않고 마스터 패스워드로 열기
+        </button>
+      </div>
     </AuthShell>
   );
 }

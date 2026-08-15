@@ -1,11 +1,13 @@
 /**
- * 세션 — 상태 기계 (login → unlocked ⇄ locked).
+ * 세션 — 상태 기계 (login → resuming → unlocked ⇄ locked).
  *
  * 위생 규칙:
- *  · **복호 키는 메모리에만 산다.** 탭 세션(sessionStorage)에 남기는 것은 잠금 화면을 그리는 데
- *    필요한 사실(이메일·KDF)과 암호문 둘 — 마스터 패스워드로 감싸인 유저키, 그리고 **유저키로
- *    감싼 세션 토큰** — 뿐이다. 그래서 새로고침은 **로그아웃이 아니라 잠금**이 된다: 탭이
- *    암호문을 되찾고, 그것을 풀 마스터 패스워드만 한 번 더 받는다.
+ *  · **복호 키는 메모리에만 산다 — 새로고침을 넘길 때만 브라우저가 봉인해 들고 있는다.**
+ *    탭 세션(sessionStorage)에 남기는 것은 잠금 화면을 그리는 데 필요한 사실(이메일·KDF)과
+ *    암호문뿐이다: 마스터 패스워드로 감싸인 유저키, 유저키로 감싼 세션 토큰, 그리고 **랩 키로
+ *    감싼 재개 봉인**(유저키+토큰). 랩 키는 IndexedDB 의 non-extractable CryptoKey 라 JS 가
+ *    바이트를 꺼낼 수 없다. 그래서 새로고침은 **쓰던 금고 화면 그대로 이어진다** — 그리고 그
+ *    이어가기가 불가능하면(유휴 초과·봉인 없음·언랩 실패) 예전처럼 **잠금**으로 떨어진다.
  *    무엇이 어떤 모양으로 저장되는지는 lib/persist.ts 한 곳이 정한다.
  *  · **평문 토큰은 금고가 열려 있는 동안에만 메모리에 있다.** 잠그면 키와 함께 버리고, 다음
  *    잠금해제가 유저키로 봉인을 풀어 되찾는다. 잠긴 탭에는 쓸 수 있는 토큰이 존재하지 않는다.
@@ -23,6 +25,8 @@
  *  · 잠금(유휴·수동)은 네트워크를 타지 않는다. 이 탭이 암호문 sync 원문을 그대로 들고 있고
  *    키만 폐기하므로, 해제는 유저키를 다시 유도해 인덱스를 재구축하면 끝이다.
  *    새로고침으로 되살아난 세션만 그 암호문이 없어 서버에서 한 번 다시 받아 온다.
+ *  · **유휴 15분은 새로고침으로 리셋되지 않는다.** 마지막 활동 시각을 탭 세션에 새기고
+ *    **부팅 시에도 검사한다** — 타이머만 믿으면 방치된 탭이 새로고침만으로 무한 연장된다.
  *
  * 한계(정직하게): JS 문자열은 zeroize 할 수 없다. 복호된 이름/계정 문자열, 잠깐 노출한 비밀번호,
  * 그리고 열려 있는 동안의 토큰 문자열은 GC 가 회수할 때까지 힙에 남는다. 그래서 애초에 미리 푸는
@@ -32,10 +36,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { HttpError, describe } from "./api.ts";
 import { authenticate, prelogin, refreshTokens, type TokenPair } from "./auth.ts";
 import {
+  IDLE_LOCK_MS,
+  armResume,
   clearSession,
+  dropResume,
+  markActivity,
   restoreFailurePhase,
   restoreSession,
   saveSession,
+  takeResume,
   unsealTokens,
   type Restored,
   type SessionFacts,
@@ -62,10 +71,15 @@ import {
  * `sso-pending` = SSO 인증만 끝나고 아직 첫 잠금해제 전. 겉보기에는 잠금 화면이지만 내부 사정이
  * 다르다 — 토큰을 감쌀 유저키가 아직 없어 **평문 토큰이 메모리에 있고 저장분은 없다**. 그래서
  * 상태를 갈라 두고 시한을 건다(아래 SSO_PENDING_MS). 화면 문구도 이 구간만 다르다.
+ *
+ * `resuming` = 새로고침 직후, 재개 봉인을 풀어 금고를 되여는 중. 잠금 화면을 띄우지 않는 이유는
+ * 그게 **거짓말이기 때문**이다 — 이 구간의 사용자는 마스터 패스워드를 넣을 필요가 없고, 잠금
+ * 화면을 스쳐 보이면 넣으려 든다. 실패하면 그때 진짜 잠금으로 떨어진다.
  */
-export type Phase = "login" | "unlocked" | "locked" | "sso-pending";
+export type Phase = "login" | "unlocked" | "locked" | "sso-pending" | "resuming";
 
-export const IDLE_LOCK_MS = 15 * 60 * 1000;
+/** 유휴 한도. 부팅 검사(새로고침 연장 방지)를 위해 저장 계층이 정의하고 여기서 재-export 한다. */
+export { IDLE_LOCK_MS };
 
 /**
  * SSO 인증 후 마스터 패스워드를 받기까지의 시한.
@@ -330,12 +344,17 @@ export function useSession(): Session {
     // 세션 자체는 그대로이므로 epoch 은 올리지 않는다.
     cancelWork();
     dropKeys();
+    // 잠금 = 이어갈 권리의 폐기다. 봉인(sessionStorage)과 랩 키(IndexedDB)를 함께 없앤다 —
+    // 이게 없으면 "잠갔는데 새로고침 한 번에 다시 열리는" 잠금이 된다.
+    void dropResume();
     // 봉인된 저장분이 있을 때만 평문 토큰을 버린다 — 다음 잠금해제가 유저키로 되찾을 수 있는
     // 경우에 한해서다. (저장분이 없는 SSO 대기 상태는 unlocked 를 지난 적이 없어 여기 오지 않지만,
     // 규칙을 조건으로 못박아 둔다.)
     if (storedRef.current) tokensRef.current = null;
     setVault(null);
-    setPhase((p) => (p === "unlocked" ? "locked" : p));
+    // "resuming" 에서의 잠금 = 이어가기 포기다 (사용자가 기다리지 않고 마스터 패스워드로 열기를
+    // 고른 경우). 그 화면에는 다른 출구가 없으므로 이 전이가 없으면 막다른 길이 된다.
+    setPhase((p) => (p === "unlocked" || p === "resuming" ? "locked" : p));
   }, [dropKeys]);
 
   const logout = useCallback(() => {
@@ -344,6 +363,7 @@ export function useSession(): Session {
     cancelWork();
     epochRef.current++;
     clearSession();
+    void dropResume();
     dropKeys();
     clearPending(pendingRef.current);
     pendingRef.current = null;
@@ -362,6 +382,7 @@ export function useSession(): Session {
     cancelWork();
     epochRef.current++;
     clearSession();
+    void dropResume();
     clearPending(pendingRef.current);
     pendingRef.current = null;
     rawSyncRef.current = null;
@@ -377,6 +398,10 @@ export function useSession(): Session {
   /**
    * 채택 — 저장까지 끝난 재료만 설치한다. 실패는 prepareAdoption 안에서 원자적으로 되돌아간다.
    * 호출부가 **직전에** 유효성을 확인한 뒤 부른다 (동기 구간이라 그 사이가 원자적이다).
+   *
+   * 금고가 열리는 **모든** 경로(로그인·잠금해제·이어가기)가 여기를 지나므로, 재개 봉인을
+   * 새로 거는 자리도 여기 하나다. 토큰이 회전됐다면 회전분으로 다시 봉인된다 — 회전은 항상
+   * 채택(또는 폐기)으로 끝나므로 죽은 토큰이 봉인에 남는 구간이 생기지 않는다.
    */
   const adopt = useCallback(
     (raw: Record<string, unknown>, facts: SessionFacts, tokens: TokenPair, userKey: Uint8Array) => {
@@ -394,6 +419,16 @@ export function useSession(): Session {
       setVault(data);
       setNotice(null);
       setPhase("unlocked");
+
+      // 이어가기 봉인은 **있으면 좋은 것**이다 — IndexedDB 가 없거나 막혀 실패해도 금고는 그대로
+      // 열려 있고, 새로고침이 잠금 화면으로 갈 뿐이다. 그래서 기다리지 않고 실패도 삼킨다.
+      // `live` = "내가 봉인하려는 그 유저키가 아직 설치돼 있는가". 잠금은 epoch 을 올리지 않고
+      // 키만 zeroize 하므로, 이 신원 대조가 없으면 봉인 도중의 잠금이 **0으로 채워진 키**를
+      // 봉인해 다음 새로고침이 "열렸는데 아무것도 못 푸는" 금고가 된다.
+      const live = () => keysRef.current?.userKey === userKey;
+      void armResume(stored, tokens, userKey, live).then((next) => {
+        if (next && live()) storedRef.current = next;
+      });
       return true;
     },
     [dropKeys],
@@ -547,6 +582,82 @@ export function useSession(): Session {
     [adopt, cancelWork, forget],
   );
 
+  /**
+   * 이어가기 — 새로고침을 넘긴 봉인을 브라우저 보관 랩 키로 풀어 금고를 되연다.
+   *
+   * 마스터 패스워드 단계만 빠졌을 뿐 **그 뒤는 잠금해제와 완전히 같은 길**이다: 같은 pullSync
+   * (토큰 회전 포함), 같은 신선도 대조(staleSessionMetadata), 같은 채택(adopt), 같은 실패 라우팅.
+   * 복원 전용 경로를 따로 파지 않은 이유가 이것이다 — 갈라 두면 한쪽에만 가드가 붙는다.
+   *
+   * 봉인을 풀지 못하는 모든 경우(랩 키 없음·암호문 손상·저장소 차단)와 서버 왕복 실패는 전부
+   * **기존 잠금 화면(마스터 패스워드) 경로로 폴백**하고, 그때 봉인을 폐기한다.
+   *
+   * 단일 실행 보장은 `resumingRef` 가 한다 — StrictMode 의 이중 마운트에서 두 번 도는 것을
+   * 막는다. (effect cleanup 의 `cancelWork` 는 이 시점에 아직 등록된 시도가 없어 닿지 않는다.)
+   */
+  const resumingRef = useRef(false);
+  const resume = useCallback(async () => {
+    if (resumingRef.current) return;
+    resumingRef.current = true;
+
+    /** 봉인을 쓸 수 없다 — 랩 키까지 치우고 기존 잠금 화면(마스터 패스워드)으로 넘긴다. */
+    const fallback = () => {
+      void dropResume();
+      setPhase((p) => (p === "resuming" ? "locked" : p));
+    };
+
+    const facts = factsRef.current;
+    const stored = storedRef.current;
+    if (!facts || !stored) return fallback();
+    const payload = await takeResume(stored);
+    if (!payload) return fallback();
+
+    // 취소(잠금·로그아웃)는 여기서부터 닿는다 — 시도를 등록해야 cancelWork 가 잡는다. 그
+    // 앞의 봉인 읽기 구간(IndexedDB 왕복 수 ms)은 취소를 놓치는데, 그 대가는 "취소를 눌렀는데
+    // 금고가 열린다" 뿐이고 그건 방금 이어가기를 시작한 사용자의 기본 동작이다. 대신 이 등록을
+    // **앞당기지 않는다** — StrictMode 의 이중 마운트 cleanup 이 첫 시도를 죽여 dev 에서만
+    // 이어가기가 깨진다.
+    const attempt = startAttempt(() => epochRef.current);
+    attempt.secrets.push(payload.userKey);
+    workRef.current = attempt;
+    try {
+      const pulled = await pullSync(facts, payload.tokens, payload.userKey, attempt, (next) => {
+        if (attempt.live()) storedRef.current = next;
+      });
+      if (!attempt.live()) return;
+      // 복원 직후의 신선도 대조. 서버에서 키가 회전됐다면 이 봉인은 폐기된 옛 세션이다 —
+      // 화면을 열어 주기 **전에** 걸린다.
+      if (staleSessionMetadata(pulled.raw, facts)) {
+        payload.userKey.fill(0);
+        forget(ACCOUNT_CHANGED);
+        return;
+      }
+      adopt(pulled.raw, facts, pulled.tokens, payload.userKey);
+    } catch (e) {
+      if (!attempt.live() || isAbort(e) || e instanceof AbandonedError) return;
+      payload.userKey.fill(0);
+      // 서버가 세션을 거부했으면 저장분 자체가 쓸모없다(forget). 네트워크 실패면 잠금 화면에
+      // 남아 마스터 패스워드로 다시 시도하게 한다 — 잠금해제 실패와 같은 규칙이다.
+      if (restoreFailurePhase(e) === "login") forget(describe(e));
+      else fallback();
+    } finally {
+      if (workRef.current === attempt) workRef.current = null;
+    }
+  }, [adopt, forget]);
+
+  /**
+   * 부팅 1회.
+   *  · 살아 있는 봉인이 있으면 이어간다.
+   *  · 없으면 **고아 랩 키를 지운다** — 탭을 닫으면 sessionStorage 의 암호문은 사라지지만
+   *    IndexedDB 는 남는다. 열 것이 없는 랩 키를 계속 두지 않는다. (유휴 만료로 봉인이 걷힌
+   *    부팅도 여기로 온다 — restoreSession 이 이미 암호문을 걷어 냈다.)
+   */
+  useEffect(() => {
+    // 부팅 판정(boot)은 첫 렌더에 고정된 값이라 의존성이 없다.
+    if (boot.phase === "resuming") void resume();
+    else void dropResume();
+  }, [boot.phase, resume]);
+
   const reveal = useCallback((item: VaultItem, fields: SecretField[]): RevealedItem => {
     const keys = keysRef.current;
     if (!keys) throw new Error("금고가 잠겨 있다");
@@ -572,6 +683,9 @@ export function useSession(): Session {
     if (phase !== "unlocked") return;
     let timer = 0;
     const arm = () => {
+      // 타이머와 **같은 사건**에 마지막 활동 시각을 새긴다. 타이머는 새로고침으로 사라지지만
+      // 이 표식은 남아, 부팅이 유휴 한도를 다시 판정한다 (새로고침 무한 연장 차단).
+      markActivity();
       clearTimeout(timer);
       timer = setTimeout(lock, IDLE_LOCK_MS);
     };
