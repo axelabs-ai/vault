@@ -99,24 +99,61 @@ export function prepareAdoption(
 }
 
 /**
- * 뒤늦게 끝난 시도를 채택해도 되는가 — **세대(generation) 대조**.
+ * 진행 중인 잠금해제 **한 건의 정체성**.
  *
- * 잠금해제는 서버 왕복을 포함하므로, 그 사이에 사용자가 로그아웃하거나 잠글 수 있다. 아무 확인
- * 없이 채택하면 **이미 로그아웃한 세션이 뒤늦게 되살아난다** (화면·저장분·메모리 키까지 전부).
- * 그래서 시도 시작 시점의 세대를 들고 있다가, 비동기 경계를 넘은 뒤 어긋났으면 결과를 버린다.
+ * 잠금해제는 서버 왕복을 포함하므로, 그 사이에 로그아웃·잠금이 끼어들고 심지어 **다른 계정으로
+ * 로그인**까지 될 수 있다. 결과를 채택할 때만 확인하는 것으로는 부족하다 — 시도는 채택 이전에도
+ * 쓴다(토큰 회전분 저장). 그래서 확인을 "채택 문 하나"가 아니라 **모든 쓰기 직전**으로 올린다.
  *
- * 버릴 때 두 가지를 한다: 유도한 유저키를 zeroize 하고, **세션이 이미 버려진 상태(로그아웃)면
- * 저장분도 다시 지운다** — 진행 중이던 시도가 그 사이 토큰 회전분을 저장해 뒀을 수 있어서다.
- * 잠금은 세션을 버리는 게 아니므로 저장분은 그대로 둔다.
+ *  · `epoch` = 세션 정체성. 로그아웃·세션 폐기가 값을 올린다. 값이 달라졌다는 것은 지금 저장분이
+ *    **내가 만든 것이 아니라는** 뜻이므로, 그 위에는 아무것도 쓰지 않는다 — 덮어쓰기는 물론
+ *    **지우지도 않는다**(남의 세션을 청소할 권한이 없다).
+ *  · `cancelled` = 이 시도가 취소됐는가. 잠금·로그아웃·언마운트가 세운다. 취소는 진행 중 fetch 를
+ *    실제로 끊고(AbortController) 유도해 둔 비밀을 **즉시** 지운다 — 뒤늦은 완료를 기다리지 않는다.
  *
- * 훅 밖의 함수다 (tests/session-restore.test.mjs 가 세 경우를 전부 고정한다).
+ * `live()` 하나로 두 조건을 함께 본다. 쓰기 **직전에** 부르고 그 사이에 await 를 두지 않으면,
+ * 단일 스레드에서 검사와 쓰기는 원자적이다.
  */
-export function abandonIfStale(gen: number, current: number, userKey: Uint8Array, sessionAlive: boolean): boolean {
-  if (gen === current) return false;
-  userKey.fill(0);
-  if (!sessionAlive) clearSession();
-  return true;
+export interface Attempt {
+  readonly epoch: number;
+  readonly controller: AbortController;
+  /** 이 시도가 유도한 비밀. 취소가 즉시 덮어쓴다. */
+  readonly secrets: Uint8Array[];
+  cancelled: boolean;
+  live(): boolean;
 }
+
+export function startAttempt(currentEpoch: () => number): Attempt {
+  const epoch = currentEpoch();
+  const attempt: Attempt = {
+    epoch,
+    controller: new AbortController(),
+    secrets: [],
+    cancelled: false,
+    live: () => !attempt.cancelled && currentEpoch() === epoch,
+  };
+  return attempt;
+}
+
+/** 취소 — 진행 중 fetch 를 실제로 끊고, 유도해 둔 비밀을 **즉시** 지운다. */
+export function cancelAttempt(attempt: Attempt | null): void {
+  if (!attempt) return;
+  attempt.cancelled = true;
+  attempt.controller.abort();
+  for (const s of attempt.secrets) s.fill(0);
+  attempt.secrets.length = 0;
+}
+
+/** 취소된 시도가 계속 굴러가지 않게 하는 신호. 화면에는 띄우지 않는다. */
+export class AbandonedError extends Error {
+  constructor() {
+    super("이 잠금해제 시도는 취소됐다");
+    this.name = "AbandonedError";
+  }
+}
+
+/** 중단으로 인한 실패인가 — 사용자가 그만두라고 한 것이므로 사유를 화면에 띄우지 않는다. */
+export const isAbort = (e: unknown): boolean => (e as { name?: string } | null)?.name === "AbortError";
 
 /**
  * 저장된 세션으로 암호문을 다시 받아 온다. 액세스 토큰이 만료(401)됐으면 리프레시 토큰으로
@@ -127,20 +164,29 @@ export function abandonIfStale(gen: number, current: number, userKey: Uint8Array
  * 회전분을 들고만 있다가 sync 가 실패해 버리면 **일시적인 장애가 강제 재로그인으로 굳는다** —
  * 다음 시도가 이미 죽은 토큰을 다시 꺼내 쓰기 때문이다. 저장이 먼저, 그다음이 sync 다.
  * `onRotate` 는 호출부의 메모리 사본을 같은 순간에 맞춰 준다 (sync 가 실패해도 갱신은 남는다).
+ *
+ * ⚠ 그 저장은 **`attempt.live()` 를 통과할 때만** 한다. 취소됐다면 유도 키는 이미 zeroize 됐고
+ * (그 키로 봉인하면 못 여는 저장분이 된다), 세션이 바뀌었다면 그 저장분은 남의 것이다. 어느
+ * 쪽이든 쓰지 않고 물러난다 — 그 대가로 회전된 토큰 하나를 잃을 뿐이고(다음 로그인으로 회복),
+ * 남의 세션을 깨뜨리지 않는다.
  */
 export async function pullSync(
   facts: SessionFacts,
   tokens: TokenPair,
   userKey: Uint8Array,
+  attempt: Attempt,
   onRotate: (stored: StoredSession, tokens: TokenPair) => void,
 ): Promise<{ raw: Record<string, unknown>; tokens: TokenPair }> {
+  const signal = attempt.controller.signal;
   try {
-    return { raw: await fetchSync(tokens.accessToken), tokens };
+    return { raw: await fetchSync(tokens.accessToken, signal), tokens };
   } catch (e) {
     if (!tokens.refreshToken || !(e instanceof HttpError) || e.status !== 401) throw e;
-    const rotated = await refreshTokens(tokens.refreshToken);
+    const rotated = await refreshTokens(tokens.refreshToken, signal);
+    // 쓰기 직전 대조 — 여기부터 saveSession 까지 await 가 없어야 원자적이다.
+    if (!attempt.live()) throw new AbandonedError();
     onRotate(saveSession(facts, rotated, userKey), rotated);
-    return { raw: await fetchSync(rotated.accessToken), tokens: rotated };
+    return { raw: await fetchSync(rotated.accessToken, signal), tokens: rotated };
   }
 }
 
@@ -184,10 +230,20 @@ export function useSession(): Session {
   /** sessionStorage 에 있는 것의 메모리 사본. */
   const storedRef = useRef<StoredSession | null>(boot.session);
   /**
-   * 세션 세대. 로그아웃·잠금이 올린다 — 진행 중이던 잠금해제가 뒤늦게 끝나 이미 끝난 세션을
-   * 되살리는 것을 막는 유일한 장치다 (abandonIfStale).
+   * 세션 정체성. **세션을 버릴 때만** 올린다(로그아웃·복원 포기) — 값이 달라졌다는 것은 지금
+   * 저장분이 내가 만든 것이 아니라는 뜻이고, 그러면 진행 중이던 시도는 아무것도 쓰지 않는다.
+   * 잠금은 세션을 버리는 게 아니므로 올리지 않는다(취소만 한다 — 회전 토큰을 살릴 수 있는 만큼
+   * 살린다).
    */
-  const genRef = useRef(0);
+  const epochRef = useRef(0);
+  /** 진행 중인 잠금해제 한 건. 로그아웃·잠금·언마운트가 이것을 즉시 취소한다. */
+  const workRef = useRef<Attempt | null>(null);
+
+  /** 진행 중 작업 취소 — fetch 중단 + 대기 중이던 유도 키 즉시 zeroize. */
+  const cancelWork = useCallback(() => {
+    cancelAttempt(workRef.current);
+    workRef.current = null;
+  }, []);
 
   const dropKeys = useCallback(() => {
     wipeKeys(keysRef.current);
@@ -196,7 +252,8 @@ export function useSession(): Session {
 
   const lock = useCallback(() => {
     // 진행 중이던 잠금해제가 있다면 그 결과는 이제 무효다 (잠그라는 지시가 더 최근이다).
-    genRef.current++;
+    // 세션 자체는 그대로이므로 epoch 은 올리지 않는다.
+    cancelWork();
     dropKeys();
     // 봉인된 저장분이 있을 때만 평문 토큰을 버린다 — 다음 잠금해제가 유저키로 되찾을 수 있는
     // 경우에 한해서다. (저장분이 없는 SSO 대기 상태는 unlocked 를 지난 적이 없어 여기 오지 않지만,
@@ -207,8 +264,10 @@ export function useSession(): Session {
   }, [dropKeys]);
 
   const logout = useCallback(() => {
-    // 진행 중이던 잠금해제가 뒤늦게 끝나도 이 로그아웃을 뒤집지 못한다.
-    genRef.current++;
+    // 진행 중이던 잠금해제는 즉시 취소하고(대기 키 zeroize), 세션 정체성을 올려 뒤늦은 완료가
+    // 저장분에 아무것도 쓰지 못하게 한다.
+    cancelWork();
+    epochRef.current++;
     clearSession();
     dropKeys();
     rawSyncRef.current = null;
@@ -223,7 +282,8 @@ export function useSession(): Session {
 
   /** 저장분을 되살릴 수 없다 — 지우고 사유와 함께 로그인 화면으로. */
   const forget = useCallback((reason: string) => {
-    genRef.current++;
+    cancelWork();
+    epochRef.current++;
     clearSession();
     rawSyncRef.current = null;
     factsRef.current = null;
@@ -236,12 +296,10 @@ export function useSession(): Session {
 
   /**
    * 채택 — 저장까지 끝난 재료만 설치한다. 실패는 prepareAdoption 안에서 원자적으로 되돌아간다.
-   * 설치 **직전**에 세대를 대조한다: 그 사이 로그아웃·잠금이 있었으면 아무것도 설치하지 않고
-   * 유도한 키를 지운 채 조용히 끝낸다 (돌아온 값 false = 채택 안 함).
+   * 호출부가 **직전에** 유효성을 확인한 뒤 부른다 (동기 구간이라 그 사이가 원자적이다).
    */
   const adopt = useCallback(
-    (gen: number, raw: Record<string, unknown>, facts: SessionFacts, tokens: TokenPair, userKey: Uint8Array) => {
-      if (abandonIfStale(gen, genRef.current, userKey, !!factsRef.current)) return false;
+    (raw: Record<string, unknown>, facts: SessionFacts, tokens: TokenPair, userKey: Uint8Array) => {
       const { keys, data, stored } = prepareAdoption(raw, facts, tokens, userKey);
       dropKeys();
       keysRef.current = keys;
@@ -258,9 +316,11 @@ export function useSession(): Session {
     [dropKeys],
   );
 
+  // 로그인·SSO 교환 중에는 로그아웃 버튼이 화면에 없다(로그인 화면·SSO 대기 화면 모두). 그래서
+  // 이 두 흐름에는 취소가 도달할 수 없고, 경합 장치도 필요 없다. 경합이 실제로 가능한 것은
+  // 잠금해제 하나뿐이다 — 잠금 화면에는 로그아웃이 있고 유휴 타이머도 돈다.
   const signIn = useCallback(
     async (emailInput: string, password: string, twoFactorCode?: string) => {
-      const gen = genRef.current;
       const pre = await prelogin(emailInput);
       const auth = await authenticate(emailInput, password, pre, twoFactorCode);
       const raw = await fetchSync(auth.accessToken);
@@ -271,7 +331,6 @@ export function useSession(): Session {
       // 체감 지연이 문제가 되면 worker 로 옮긴다.
       const userKey = decryptUserKey(encUserKey, auth.email, password, pre.kdf);
       adopt(
-        gen,
         raw,
         { email: auth.email, kdf: pre.kdf, encUserKey },
         { accessToken: auth.accessToken, refreshToken: auth.refreshToken },
@@ -314,10 +373,10 @@ export function useSession(): Session {
    */
   const unlock = useCallback(
     async (password: string) => {
-      // 이 시도의 세대. 서버 왕복 동안 로그아웃·잠금이 끼어들면 결과를 통째로 버린다.
-      const gen = genRef.current;
       const facts = factsRef.current;
       if (!facts) throw new Error(NO_SESSION);
+      // 이전 시도가 남아 있으면 먼저 정리한다 (화면이 중복 제출을 막지만 규칙은 여기 둔다).
+      cancelWork();
 
       // 이 단계의 입력 중 사용자가 준 것은 패스워드뿐이다 (암호문·KDF·이메일은 서버가 준 값이고
       // 저장 시 검사를 통과했다). 그래서 여기서의 실패 = 패스워드 불일치다. SDK 원문
@@ -329,6 +388,12 @@ export function useSession(): Session {
       } catch {
         throw new Error(WRONG_PASSWORD);
       }
+
+      // 여기서부터가 "진행 중인 작업" 이다. 유도한 키를 등록해 두면 로그아웃·잠금·언마운트가
+      // 뒤늦은 완료를 기다리지 않고 **즉시** 덮어쓸 수 있다.
+      const attempt = startAttempt(() => epochRef.current);
+      attempt.secrets.push(userKey);
+      workRef.current = attempt;
 
       let tokens = tokensRef.current;
       if (!tokens) {
@@ -347,29 +412,36 @@ export function useSession(): Session {
         }
       }
 
-      let raw = rawSyncRef.current;
-      if (!raw) {
-        try {
+      try {
+        let raw = rawSyncRef.current;
+        if (!raw) {
           // 토큰이 회전되면 그 즉시 저장분과 메모리 사본이 함께 갱신된다 (pullSync 주석 참조).
-          const pulled = await pullSync(facts, tokens, userKey, (stored) => {
+          // 그 저장도 attempt.live() 를 통과할 때만 일어난다.
+          const pulled = await pullSync(facts, tokens, userKey, attempt, (stored) => {
+            if (!attempt.live()) return;
             storedRef.current = stored;
           });
           raw = pulled.raw;
           tokens = pulled.tokens;
-        } catch (e) {
-          // 취소된 시도의 실패는 화면에 띄우지 않는다 — 이미 다른 화면에 있다.
-          if (abandonIfStale(gen, genRef.current, userKey, !!factsRef.current)) return;
-          userKey.fill(0);
-          // 서버가 세션을 거부했으면 저장분은 쓸모없다 — 지우고 사유와 함께 로그인 화면으로.
-          // 네트워크 실패면 잠금 화면에 남아 다시 시도하게 한다 (persist.ts 참조).
-          if (restoreFailurePhase(e) === "login") forget(describe(e));
-          throw e;
         }
+        // 설치 직전 마지막 대조 — 여기부터 adopt 끝까지 await 가 없어 원자적이다.
+        if (!attempt.live()) return;
+        adopt(raw, facts, tokens, userKey);
+      } catch (e) {
+        // 취소됐다면 키는 cancelAttempt 가 이미 지웠고, 화면도 더 이상 내 것이 아니다.
+        // 중단(abort)도 사용자가 그만두라고 한 것이므로 사유를 띄우지 않는다.
+        if (!attempt.live() || isAbort(e) || e instanceof AbandonedError) return;
+        userKey.fill(0);
+        // 서버가 세션을 거부했으면 저장분은 쓸모없다 — 지우고 사유와 함께 로그인 화면으로.
+        // 네트워크 실패면 잠금 화면에 남아 다시 시도하게 한다 (persist.ts 참조).
+        if (restoreFailurePhase(e) === "login") forget(describe(e));
+        throw e;
+      } finally {
+        // 끝난 시도는 더 이상 취소 대상이 아니다 — 채택된 키를 나중에 지워 버리지 않게.
+        if (workRef.current === attempt) workRef.current = null;
       }
-
-      adopt(gen, raw, facts, tokens, userKey);
     },
-    [adopt, forget],
+    [adopt, cancelWork, forget],
   );
 
   const reveal = useCallback((item: VaultItem, fields: SecretField[]): RevealedItem => {
@@ -394,8 +466,15 @@ export function useSession(): Session {
     };
   }, [phase, lock]);
 
-  // 언마운트(탭 이탈 포함) 시 키를 덮어쓴다. 메모리는 어차피 사라지지만 명시적으로 지운다.
-  useEffect(() => dropKeys, [dropKeys]);
+  // 언마운트(탭 이탈 포함) 시 진행 중 왕복을 끊고 키를 덮어쓴다. 메모리는 어차피 사라지지만
+  // 명시적으로 지운다 — 대기 중이던 유도 키도 여기서 함께 사라진다.
+  useEffect(
+    () => () => {
+      cancelWork();
+      dropKeys();
+    },
+    [cancelWork, dropKeys],
+  );
 
   return { phase, email, vault, notice, signIn, completeSso, unlock, lock, logout, reveal };
 }

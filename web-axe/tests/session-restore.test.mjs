@@ -287,64 +287,147 @@ test("저장 페이로드 검사에 걸려도 마찬가지로 키를 지운다",
 // ------------------------------------------------------- 경합 (뒤늦은 완료·토큰 회전)
 
 /**
- * 잠금해제는 서버 왕복을 포함하므로 그 사이에 로그아웃이 끼어들 수 있다. 세대 대조가 없으면
- * 뒤늦게 끝난 해제가 **이미 로그아웃한 세션을 되살린다** — 화면도, 저장분도, 메모리 키까지.
- * 어느 화면에도 안 나타나는 종류라 여기서 못박는다.
- * (phase 가 login 에 남는 것은 구조로 보장된다: abandonIfStale 이 true 를 주면 useSession.adopt
- *  이 setState 한 줄도 실행하지 않고 되돌아간다.)
+ * 잠금해제는 서버 왕복을 포함한다. 그 사이에 로그아웃·잠금이 끼어들고, 심지어 **다른 계정으로
+ * 로그인**까지 될 수 있다. 채택 지점만 막는 것으로는 부족하다 — 시도는 채택 이전에도 쓴다
+ * (토큰 회전분 저장). 그래서 여기서 고정하는 것은 "쓰기 직전 대조" 자체다:
+ * 취소·세션 교체 이후의 뒤늦은 완료는 **아무것도 쓰지 않고**, 남의 저장분은 지우지도 않는다.
+ * (phase·배너가 오염되지 않는 것은 구조로 보장된다: useSession.unlock 이 catch 에서
+ *  live()·isAbort·AbandonedError 를 보고 setState 한 줄 없이 되돌아간다.)
  */
-test("잠금해제 중 로그아웃하면 뒤늦은 완료가 세션을 되살리지 못한다", () => {
-  const inflightKey = userKey();
-  // 진행 중이던 시도가 그 사이 토큰 회전분을 저장해 둔 상황까지 재현한다.
-  persist.saveSession(FACTS(), TOKENS(), userKey());
 
-  // 로그아웃 = 세대 상승 + 세션 폐기(sessionAlive=false)
-  assert.equal(session.abandonIfStale(1, 2, inflightKey, false), true, "채택하면 안 된다");
-  assert.ok(zeroed(inflightKey), "버려진 시도의 유저키가 살아 있다");
-  assert.equal(stored(), undefined, "로그아웃했는데 저장분이 되살아났다");
-});
-
-test("잠금은 세션을 버리는 게 아니다 — 뒤늦은 완료의 키만 지우고 저장분은 남긴다", () => {
-  const inflightKey = userKey();
-  persist.saveSession(FACTS(), TOKENS(), userKey());
-
-  assert.equal(session.abandonIfStale(1, 2, inflightKey, true), true);
-  assert.ok(zeroed(inflightKey), "버려진 시도의 유저키가 살아 있다");
-  assert.ok(stored(), "잠금이 저장분을 지우면 다음 잠금해제가 재로그인이 된다");
-});
-
-test("세대가 그대로면 정상 채택 경로다 (키를 지우지 않는다)", () => {
-  const key = userKey();
-  assert.equal(session.abandonIfStale(3, 3, key, true), false);
-  assert.ok(!zeroed(key), "정상 경로에서 키를 지우면 안 된다");
-});
-
-/** api.ts 가 쓰는 것만 흉내낸다 (ok·status·text). */
+/** api.ts 가 쓰는 것만 흉내낸다 (ok·status·text). signal 이 이미 끊겼으면 진짜처럼 거절한다. */
 const res = (status, body) => ({ ok: status < 400, status, text: async () => JSON.stringify(body) });
+const abortError = () => Object.assign(new Error("The operation was aborted."), { name: "AbortError" });
 
-test("리프레시로 회전한 토큰은 sync 가 실패해도 저장분에 남는다 (다음 시도가 그걸 쓴다)", async () => {
-  const ROTATED_ACCESS = "eyJhbGciOiJSUzI1NiJ9.cm90YXRlZA.c2ln"; // pragma: allowlist secret
-  const ROTATED_REFRESH = "rotated-refresh-9c2b"; // pragma: allowlist secret
+const ROTATED_ACCESS = "eyJhbGciOiJSUzI1NiJ9.cm90YXRlZA.c2ln"; // pragma: allowlist secret
+const ROTATED_REFRESH = "rotated-refresh-9c2b"; // pragma: allowlist secret
+
+/** 401 → 리프레시 성공 → (그다음 sync 는 호출부가 정한다) */
+function rotatingFetch(afterRotate) {
+  let syncCalls = 0;
+  return async (url, init) => {
+    if (init?.signal?.aborted) throw abortError();
+    if (String(url).includes("/identity/connect/token")) {
+      return res(200, { access_token: ROTATED_ACCESS, refresh_token: ROTATED_REFRESH, expires_in: 3600 });
+    }
+    syncCalls += 1;
+    return syncCalls === 1 ? res(401, {}) : afterRotate();
+  };
+}
+
+/** 지금 이 순간부터 stale 인 시도 (로그아웃·세션 교체가 epoch 을 올린 뒤). */
+function staleAttempt() {
+  let epoch = 0;
+  const attempt = session.startAttempt(() => epoch);
+  epoch += 1; // 로그아웃/세션 교체
+  return attempt;
+}
+
+test("로그아웃 중 리프레시가 성공해도 저장분을 다시 만들지 않는다", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = rotatingFetch(() => res(200, { profile: {} }));
+  try {
+    // 로그아웃 직후 = 저장분이 비어 있다.
+    assert.equal(stored(), undefined);
+    let rotated = false;
+    await assert.rejects(
+      () => session.pullSync(FACTS(), TOKENS(), userKey(), staleAttempt(), () => (rotated = true)),
+      (e) => e instanceof session.AbandonedError,
+      "취소된 시도는 물러나야 한다",
+    );
+    assert.equal(rotated, false, "onRotate 가 불렸다 = 쓰기 직전 대조가 없다");
+    assert.equal(stored(), undefined, "로그아웃한 세션의 저장분이 되살아났다");
+    assert.equal(store.size, 0);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("다른 계정으로 로그인한 뒤 도착한 뒤늦은 회전은 새 세션의 저장분을 건드리지 않는다", async () => {
+  // 계정 B 로 새로 로그인한 상태.
+  const keyB = userKey();
+  const factsB = { ...FACTS(), email: "other@axelabs.ai" };
+  const tokensB = { accessToken: "eyJhbGciOiJSUzI1NiJ9.Yg.c2ln", refreshToken: "b-refresh" }; // pragma: allowlist secret
+  persist.saveSession(factsB, tokensB, keyB);
+  const snapshot = stored();
+
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = rotatingFetch(() => res(200, { profile: {} }));
+  try {
+    // 계정 A 의 시도가 뒤늦게 회전에 성공해 돌아온다.
+    await assert.rejects(
+      () => session.pullSync(FACTS(), TOKENS(), userKey(), staleAttempt(), () => {}),
+      (e) => e instanceof session.AbandonedError,
+    );
+
+    // 덮어쓰기도, 삭제도 없어야 한다 — 내가 만든 저장분이 아니면 손대지 않는다.
+    assert.equal(stored(), snapshot, "새 세션의 저장분이 오염됐다");
+    assert.deepEqual(persist.unsealTokens(persist.loadSession(), keyB), tokensB, "B 세션이 여전히 열려야 한다");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("취소는 대기 중인 유도 키를 즉시 지운다 (뒤늦은 완료를 기다리지 않는다)", async () => {
+  const key = userKey();
+  let epoch = 0;
+  const attempt = session.startAttempt(() => epoch);
+  attempt.secrets.push(key);
+
+  // 영영 끝나지 않는 왕복 — 이 상태에서 로그아웃이 일어난다.
+  let release;
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => new Promise((r) => (release = r));
+  try {
+    const inflight = session.pullSync(FACTS(), TOKENS(), key, attempt, () => {}).catch((e) => e);
+
+    // 로그아웃: 취소 + 세션 정체성 상승
+    session.cancelAttempt(attempt);
+    epoch += 1;
+
+    // 완료를 기다리지 않고 지금 이미 지워져 있어야 한다.
+    assert.ok(zeroed(key), "취소했는데 대기 중이던 유저키가 살아 있다");
+    assert.equal(attempt.controller.signal.aborted, true, "진행 중 왕복이 중단되지 않았다");
+    assert.equal(attempt.live(), false);
+    assert.equal(attempt.secrets.length, 0);
+
+    release(res(200, { profile: {} }));
+    await inflight;
+    assert.equal(stored(), undefined, "취소된 시도가 저장분을 만들었다");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("중단(abort)은 AbortError 로 식별돼 조용히 끝난다 (화면에 사유를 띄우지 않는다)", async () => {
+  const attempt = session.startAttempt(() => 0);
+  session.cancelAttempt(attempt); // 이미 중단된 상태로 들어간다
+
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = rotatingFetch(() => res(200, { profile: {} }));
+  try {
+    const err = await session.pullSync(FACTS(), TOKENS(), userKey(), attempt, () => {}).catch((e) => e);
+    assert.ok(session.isAbort(err), `AbortError 로 식별돼야 한다: ${err?.name}`);
+    // 중단은 "세션 거부" 가 아니다 — 저장분을 지우지도, 로그인으로 보내지도 않는다.
+    assert.equal(api.isAuthRejection(err), false);
+    assert.equal(persist.restoreFailurePhase(err), "locked");
+    assert.equal(stored(), undefined);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("살아 있는 시도에서는 회전한 토큰이 sync 실패에도 저장분에 남는다 (다음 시도가 그걸 쓴다)", async () => {
   const facts = FACTS();
   const key = userKey();
   persist.saveSession(facts, TOKENS(), key); // 저장분은 아직 구 토큰
 
   const origFetch = globalThis.fetch;
-  let syncCalls = 0;
-  globalThis.fetch = async (url) => {
-    const u = String(url);
-    if (u.includes("/identity/connect/token")) {
-      return res(200, { access_token: ROTATED_ACCESS, refresh_token: ROTATED_REFRESH, expires_in: 3600 });
-    }
-    syncCalls += 1;
-    // 1) 액세스 토큰 만료 → 2) 회전 후 재시도는 일시 장애
-    return syncCalls === 1 ? res(401, {}) : res(500, { message: "일시 장애" });
-  };
-
+  globalThis.fetch = rotatingFetch(() => res(500, { message: "일시 장애" }));
   try {
     let rotatedSeen = null;
     await assert.rejects(
-      () => session.pullSync(facts, TOKENS(), key, (s, t) => (rotatedSeen = t)),
+      () => session.pullSync(facts, TOKENS(), key, session.startAttempt(() => 0), (s, t) => (rotatedSeen = t)),
       /일시 장애/,
       "sync 실패는 그대로 올라와야 한다 (잠금 화면 유지·재시도 가능)",
     );
@@ -356,7 +439,6 @@ test("리프레시로 회전한 토큰은 sync 가 실패해도 저장분에 남
       accessToken: ROTATED_ACCESS,
       refreshToken: ROTATED_REFRESH,
     });
-    assert.equal(syncCalls, 2, "회전 후 sync 를 정확히 한 번 더 시도해야 한다");
   } finally {
     globalThis.fetch = origFetch;
   }

@@ -61,8 +61,8 @@ export const CIPHER_TYPE_LABEL: Record<number, string> = {
 };
 
 /** 서버에서 sync 원문을 받는다. 이 시점의 값은 전부 암호문이므로 잠금 상태에도 들고 있어도 된다. */
-export async function fetchSync(token: string): Promise<Record<string, unknown>> {
-  return (await apiGet("/sync?excludeDomains=true", token)) as Record<string, unknown>;
+export async function fetchSync(token: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  return (await apiGet("/sync?excludeDomains=true", token, signal)) as Record<string, unknown>;
 }
 
 const asRecord = (v: unknown): Record<string, unknown> => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});

@@ -144,13 +144,13 @@ export const readTokens = (json: Record<string, unknown>, accessToken: string): 
  * 리프레시 토큰이 죽었으면 `400 {"error":"invalid_grant"}` 이고, 그 판정은
  * api.ts `isAuthRejection` 이 한다 — 그때는 재로그인 말고는 길이 없다.
  */
-export async function refreshTokens(refreshToken: string): Promise<TokenPair> {
+export async function refreshTokens(refreshToken: string, signal?: AbortSignal): Promise<TokenPair> {
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     client_id: CLIENT_ID,
     refresh_token: refreshToken,
   });
-  const { json, accessToken } = await tokenGrant(body);
+  const { json, accessToken } = await tokenGrant(body, signal);
   // 서버가 새 리프레시 토큰을 주면 갈아 끼우고, 안 주면 쓰던 것을 계속 쓴다.
   return { accessToken, refreshToken: pick<string>(json, "refresh_token", "refreshToken") ?? refreshToken };
 }
@@ -198,10 +198,13 @@ export function applyTwoFactor(body: URLSearchParams, twoFactorCode: string | un
  * `/connect/token` 왕복 + 2FA 요구 정규화 + access_token 추출.
  * grant 종류(password·authorization_code)와 무관한 공통 껍데기다.
  */
-export async function tokenGrant(body: URLSearchParams): Promise<{ json: Record<string, unknown>; accessToken: string }> {
+export async function tokenGrant(
+  body: URLSearchParams,
+  signal?: AbortSignal,
+): Promise<{ json: Record<string, unknown>; accessToken: string }> {
   let json: Record<string, unknown>;
   try {
-    json = (await identityPost("/connect/token", body)) as Record<string, unknown>;
+    json = (await identityPost("/connect/token", body, signal)) as Record<string, unknown>;
   } catch (e) {
     if (e instanceof HttpError) {
       const providers = twoFactorProviders(e.body);

@@ -78,11 +78,12 @@ export async function identityGet(path: string): Promise<unknown> {
   return readJson(res, `identity ${path}`);
 }
 
-export async function identityPost(path: string, body: URLSearchParams): Promise<unknown> {
+export async function identityPost(path: string, body: URLSearchParams, signal?: AbortSignal): Promise<unknown> {
   const res = await fetch(`${identityUrl()}${path}`, {
     method: "POST",
     headers: clientHeaders({ "Content-Type": "application/x-www-form-urlencoded" }),
     body,
+    signal,
   });
   return readJson(res, `identity ${path}`);
 }
@@ -96,9 +97,11 @@ export async function identityPostJson(path: string, body: unknown): Promise<unk
   return readJson(res, `identity ${path}`);
 }
 
-export async function apiGet(path: string, token: string): Promise<unknown> {
+/** `signal` 로 중단할 수 있다 — 로그아웃·잠금이 진행 중인 왕복을 실제로 끊는다. */
+export async function apiGet(path: string, token: string, signal?: AbortSignal): Promise<unknown> {
   const res = await fetch(`${apiUrl()}${path}`, {
     headers: clientHeaders({ Authorization: `Bearer ${token}` }),
+    signal,
   });
   // 401 만 문구를 갈아 준다 — 서버 바디가 화면에 그대로 쓸 수 없는 형태다.
   if (res.status === 401) throw new HttpError(401, "세션이 만료됐다. 다시 로그인해야 한다.", null);
