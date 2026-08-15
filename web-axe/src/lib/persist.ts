@@ -570,8 +570,18 @@ export async function sweepStaleWrapSlots(now = Date.now()): Promise<void> {
         const beats = tx.objectStore(BEAT_STORE);
         const all = wrap.getAll();
         all.onsuccess = () => {
-          for (const slot of (all.result as WrapSlot[]) ?? []) {
-            if (!slot?.id) continue;
+          const slots = ((all.result as WrapSlot[]) ?? []).filter((s) => s?.id);
+          // 짝 없는 생존 신호도 같은 트랜잭션에서 치운다 — 지킬 슬롯이 없는 표식이다.
+          // (무장이 신호를 슬롯보다 먼저 쓰므로 나이로 한 번 걸러, 그 찰나를 치지 않는다.)
+          const paired = new Set(slots.map((s) => s.id));
+          const strays = beats.getAll();
+          strays.onsuccess = () => {
+            for (const b of (strays.result as Beat[]) ?? []) {
+              if (b?.id && !paired.has(b.id) && now - b.at > SLOT_TTL_MS) beats.delete(b.id);
+            }
+          };
+
+          for (const slot of slots) {
             const { id, gen } = slot;
             const seen = beats.get(id);
             seen.onsuccess = () => {
@@ -622,12 +632,16 @@ export interface ResumePayload {
  *
  * 실패는 전부 `null` 이다 — 재개는 **있으면 좋은 것**이고, 없으면 마스터 패스워드 경로로
  * 돌아갈 뿐이다. 이 함수의 어떤 실패도 열려 있는 금고를 방해하지 않는다.
+ *
+ * 무장은 **직렬화된다** (armResume 이 이 함수를 줄 세운다). 겹치면 앞선 무장의 정리 경로가
+ * 뒤 무장이 방금 만든 세대를 지운다 — 세대 비교를 더 정교하게 만드는 대신 **겹침 자체를
+ * 없앤다**. 무장은 잠금해제당 한 번이라 줄 세워도 잃을 것이 없다.
  */
-export async function armResume(
+async function armOnce(
   stored: StoredSession,
   tokens: TokenPair,
   userKey: Uint8Array,
-  live: () => boolean = () => true,
+  live: () => boolean,
 ): Promise<StoredSession | null> {
   if (typeof crypto === "undefined" || !crypto?.subtle) return null;
   const id = ensureTabId();
@@ -696,6 +710,30 @@ export async function armResume(
     await deleteWrapKey();
     return null;
   }
+}
+
+/** 진행 중인 무장. 겹쳐 부르면 여기에 이어 붙는다 (실패해도 줄은 끊기지 않는다). */
+let arming: Promise<unknown> = Promise.resolve();
+
+/**
+ * 무장 — **직렬화된 armOnce**. 겹쳐 부르면 앞선 무장이 끝난 뒤에 시작한다.
+ *
+ * 겹침을 허용하면 앞선 무장의 실패 정리(`deleteWrapKey`)가 **뒤 무장이 방금 만든 세대**를
+ * 지운다 — 그러면 금고는 열려 있는데 다음 새로고침이 잠금으로 떨어진다. 세대 비교를 더
+ * 정교하게 만드는 대신 겹침 자체를 없앤다.
+ */
+export function armResume(
+  stored: StoredSession,
+  tokens: TokenPair,
+  userKey: Uint8Array,
+  live: () => boolean = () => true,
+): Promise<StoredSession | null> {
+  const next = arming.then(() => armOnce(stored, tokens, userKey, live));
+  arming = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
 }
 
 /**

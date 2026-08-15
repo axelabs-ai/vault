@@ -1167,6 +1167,46 @@ test("캡처한 세대와 다른 세대의 슬롯은 지우지 않는다 (뒤늦
   assert.equal(await dup.takeResume(first.stored), null, "옛 봉인이 아직 열린다");
 });
 
+test("겹쳐 부른 무장은 줄을 선다 — 앞선 정리가 새 세대의 랩 키를 지우지 않는다", async () => {
+  const k1 = userKey();
+  const k2 = userKey();
+  const s1 = persist.saveSession(FACTS(), TOKENS(), k1);
+
+  // 1번 무장은 **쓰기 직전에** 실패하는 경로(잠금이 끼어든 상황)라 정리를 돈다.
+  // 겹침을 허용하면 그 정리가 2번 무장이 방금 만든 세대를 지운다.
+  let checks = 0;
+  const first = persist.armResume(s1, TOKENS(), k1, () => ++checks === 1);
+  const s2 = persist.saveSession(FACTS(), TOKENS(), k2);
+  const second = persist.armResume(s2, TOKENS(), k2);
+  const [r1, r2] = await Promise.all([first, second]);
+
+  assert.equal(r1, null, "정리 경로를 타는 무장은 봉인을 남기지 않는다");
+  assert.ok(r2?.resume, "뒤 무장이 봉인을 만들지 못했다");
+
+  const payload = await persist.takeResume(r2);
+  assert.ok(payload, "앞선 무장의 정리가 새 세대의 랩 키를 지웠다");
+  assert.deepEqual([...payload.userKey], [...k2]);
+  assert.equal(rows("wrap").length, 1, "슬롯이 겹쳐 쌓였다");
+});
+
+test("짝 없는 생존 신호는 스윕이 치운다", async () => {
+  const t0 = Date.now();
+  await armed();
+
+  // wrap 레코드 없이 남은 beat (무장이 중간에 깨진 흔적).
+  const beats = idb.dbs.get("axe-vault").stores.get("beat");
+  beats.set("ghost", { id: "ghost", at: t0 - persist.SLOT_TTL_MS - 1000 });
+  assert.equal(rows("beat").length, 2);
+
+  await persist.sweepStaleWrapSlots(t0);
+  assert.deepEqual(
+    rows("beat").map((b) => b.id),
+    [store.get("axe-vault.tab")],
+    "짝 없는 신호가 영구 잔존한다",
+  );
+  assert.equal(rows("wrap").length, 1, "살아 있는 슬롯을 건드렸다");
+});
+
 test("고아 청소는 슬롯과 생존 신호를 함께 치운다", async () => {
   const t0 = Date.now();
   newTab();
