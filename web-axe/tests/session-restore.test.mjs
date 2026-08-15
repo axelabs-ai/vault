@@ -2,14 +2,19 @@
  * 탭 세션 보존의 경계 검증 — "새로고침 = 잠금" 을 지탱하는 저장 계약.
  *
  * 왜 이것들인가 — 전부 **조용히 어긋나는** 종류라서다:
- *  · 저장 페이로드에 평문 키가 한 번 섞이면 화면은 멀쩡히 동작한다. 눈으로는 영원히 안 보이고,
- *    devtools 를 열어 본 사람만 안다. 그래서 스키마를 기계가 대조한다 (이 파일의 핵심).
+ *  · 저장 페이로드에 평문이 한 번 섞이면 화면은 멀쩡히 동작한다. 눈으로는 영원히 안 보이고,
+ *    devtools 를 열어 본 사람만 안다. 특히 **세션 토큰**은 "서버도 가진 값" 이 아니라 권한
+ *    그 자체다 — refresh 토큰은 마스터 패스워드 없이 계정 권한을 행사한다. 그래서 토큰이
+ *    유저키 봉인 밖으로 새지 않는지를 스키마와 덤프 양쪽으로 못박는다 (이 파일의 핵심).
  *  · localStorage 로 새면 탭을 닫아도 남는다 — "탭을 닫으면 사라집니다" 라는 약속이 거짓이 된다.
+ *  · 채택이 원자적이지 않으면, 저장에 실패한 순간 화면은 로그인인데 메모리에는 복호된 키가
+ *    살아 있는 상태가 만들어진다. 그건 어떤 화면에도 나타나지 않는다.
  *  · 토큰 만료와 네트워크 장애를 같이 처리하면, 잠깐 끊긴 와이파이가 재로그인을 강요하거나
  *    (반대로) 죽은 세션이 잠금 화면에 영원히 남는다.
  *
  * 브라우저 전역(sessionStorage·localStorage)은 Node 에 없으므로 최소 스텁을 여기서 깐다.
  * localStorage 스텁은 **쓰기를 시도하면 터진다** — 규칙 위반이 테스트 실패로 드러나게.
+ * 크립토는 앱과 **같은 SDK 인스턴스**를 쓴다 (봉인을 우리가 흉내내면 검증의 의미가 없다).
  */
 import { test, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -18,12 +23,13 @@ import { fileURLToPath } from "node:url";
 
 // --- 브라우저 전역 스텁 (import 전에 깔아야 모듈 최상단 평가가 통과한다) ---
 const store = new Map();
-globalThis.sessionStorage = {
+const sessionStub = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
   setItem: (k, v) => store.set(k, String(v)),
   removeItem: (k) => store.delete(k),
   clear: () => store.clear(),
 };
+globalThis.sessionStorage = sessionStub;
 globalThis.localStorage = {
   getItem: () => null,
   setItem: () => assert.fail("localStorage 에 쓰려 했다 — 이 앱은 localStorage 를 쓰지 않는다"),
@@ -33,37 +39,47 @@ globalThis.location = { origin: "https://vault.axelabs.ai", hash: "", pathname: 
 
 let persist;
 let api;
+let session;
+let PureCrypto;
 
 before(async () => {
   persist = await import("../src/lib/persist.ts");
   api = await import("../src/lib/api.ts");
+  session = await import("../src/lib/session.ts");
+  ({ PureCrypto } = await import("../src/sdk.ts"));
 });
 
-beforeEach(() => store.clear());
+beforeEach(() => {
+  store.clear();
+  sessionStub.setItem = (k, v) => store.set(k, String(v));
+});
 
 /** 합성 값 — 실계정·실볼트와 무관하다 (crypto.test.mjs 의 PoC 벡터와 같은 성격). */
 const ENC_USER_KEY =
   "2.Q8rMaxWA3mEh2E2bYkRafg==|Dyy8BlNZnBiuC/0U9PoM1+ysExlH9RqEE4t+RyWmDqPRgCV+szzeHvfTJkVg5xofWLhtbLXWEpcUzSXvtdLAkMXEBI4+waJ6QbMsPjfK1m0=|rZZMQ+ExL8xGWgai3+bOuH4Pq3vII/IbVsxB8Eh3b1Y="; // pragma: allowlist secret
 
-const SEED = () => ({
-  email: "poc@axelabs.ai",
-  kdf: { pBKDF2: { iterations: 600000 } },
-  accessToken: "eyJhbGciOiJSUzI1NiJ9.stub-access-token.sig", // pragma: allowlist secret
-  refreshToken: "stub-refresh-token", // pragma: allowlist secret
-  encUserKey: ENC_USER_KEY,
-});
+/** 진짜 JWT 모양의 합성 토큰 — 덤프에서 찾기 쉬우라고 접두사 `eyJ` 를 그대로 쓴다. */
+const ACCESS_TOKEN = "eyJhbGciOiJSUzI1NiJ9.c3R1Yi1hY2Nlc3M.c2ln"; // pragma: allowlist secret
+const REFRESH_TOKEN = "stub-refresh-token-7f3a91"; // pragma: allowlist secret
+
+const FACTS = () => ({ email: "poc@axelabs.ai", kdf: { pBKDF2: { iterations: 600000 } }, encUserKey: ENC_USER_KEY });
+const TOKENS = () => ({ accessToken: ACCESS_TOKEN, refreshToken: REFRESH_TOKEN });
+const userKey = () => PureCrypto.make_user_key_aes256_cbc_hmac();
 
 const stored = () => store.get("axe-vault.session");
+
+/** 잠긴 탭의 sessionStorage 를 통째로 뜬 것 — 공격자가 볼 수 있는 전부. */
+const dump = () => JSON.stringify([...store.entries()]);
 
 // ------------------------------------------------------------ 새로고침 복원
 
 test("새로고침 복원 — 저장된 세션이 있으면 로그인이 아니라 잠금 화면에서 시작한다", () => {
-  persist.saveSession(SEED());
+  persist.saveSession(FACTS(), TOKENS(), userKey());
 
   const boot = persist.restoreSession();
   assert.equal(boot.phase, "locked");
   assert.equal(boot.session.email, "poc@axelabs.ai");
-  // 잠금 해제에 필요한 재료가 전부 살아 있다 — 이게 없으면 화면만 잠금이고 열 수가 없다.
+  // 잠금 화면을 그리고 유저키를 유도할 재료가 살아 있다 — 없으면 화면만 잠금이고 열 수가 없다.
   assert.equal(boot.session.encUserKey, ENC_USER_KEY);
   assert.deepEqual(boot.session.kdf, { pBKDF2: { iterations: 600000 } });
 });
@@ -75,9 +91,17 @@ test("저장된 세션이 없으면 로그인 화면에서 시작한다", () => 
 });
 
 test("낯선 스키마·오염된 저장분은 되살리지 않고 버린다", () => {
-  for (const junk of ["not json", "{}", JSON.stringify({ ...SEED(), v: 99 }), JSON.stringify({ v: 1 })]) {
-    store.set("axe-vault.session", junk);
-    assert.equal(persist.loadSession(), null, `되살아나면 안 된다: ${junk.slice(0, 40)}`);
+  const junk = [
+    "not json",
+    "{}",
+    JSON.stringify({ v: 99, ...FACTS(), encTokens: "2.a|b|c" }),
+    // 구 스키마(v1, 평문 토큰) — 마이그레이션하지 않고 버린다. 평문 토큰을 되살릴 이유가 없다.
+    JSON.stringify({ v: 1, ...FACTS(), accessToken: ACCESS_TOKEN, refreshToken: REFRESH_TOKEN }),
+    JSON.stringify({ v: 2, ...FACTS() }), // 봉인 누락
+  ];
+  for (const j of junk) {
+    store.set("axe-vault.session", j);
+    assert.equal(persist.loadSession(), null, `되살아나면 안 된다: ${j.slice(0, 40)}`);
     assert.equal(stored(), undefined, "쓸 수 없는 저장분은 지워져야 한다");
   }
 });
@@ -85,7 +109,7 @@ test("낯선 스키마·오염된 저장분은 되살리지 않고 버린다", (
 // ------------------------------------------------------- 탭 수명 · 로그아웃
 
 test("탭 계약 — 저장은 sessionStorage 의 axe-vault 이름공간에만 한다", () => {
-  persist.saveSession(SEED());
+  persist.saveSession(FACTS(), TOKENS(), userKey());
   // localStorage 스텁이 쓰기에서 터지므로, 여기까지 왔다는 것 자체가 절반의 증명이다.
   assert.deepEqual([...store.keys()], ["axe-vault.session"]);
   assert.equal(persist.SESSION_KEY, "axe-vault.session");
@@ -115,7 +139,7 @@ test("src 어디에도 localStorage 쓰기·읽기가 없다 (레거시 제거�
 });
 
 test("로그아웃 — 저장분 잔존 0", () => {
-  persist.saveSession(SEED());
+  persist.saveSession(FACTS(), TOKENS(), userKey());
   assert.ok(stored());
 
   persist.clearSession();
@@ -128,8 +152,32 @@ test("로그아웃 — 저장분 잔존 0", () => {
 // ------------------------------------------ 저장 페이로드 스키마 (핵심 회귀 방어)
 
 test("저장 페이로드는 허용 필드가 전부다", () => {
-  persist.saveSession(SEED());
+  persist.saveSession(FACTS(), TOKENS(), userKey());
   assert.deepEqual(Object.keys(JSON.parse(stored())), [...persist.SESSION_FIELDS]);
+});
+
+test("잠긴 탭의 저장분에 평문 토큰이 없다 — 토큰은 유저키 봉인 안에만 있다", () => {
+  const key = userKey();
+  persist.saveSession(FACTS(), TOKENS(), key);
+
+  const raw = dump();
+  // 토큰 값 자체는 물론이고, 접두사·필드명까지 새면 안 된다.
+  for (const forbidden of [ACCESS_TOKEN, REFRESH_TOKEN, "eyJ", "accessToken", "refreshToken", "Bearer"]) {
+    assert.ok(!raw.includes(forbidden), `잠긴 저장분에 ${forbidden} 이 새어 나갔다`);
+  }
+  // 봉인은 EncString 이고, 그 안에서만 토큰이 되살아난다.
+  const sealed = JSON.parse(stored()).encTokens;
+  assert.match(sealed, /^\d+\.[A-Za-z0-9+/=|]+$/);
+  assert.deepEqual(persist.unsealTokens({ encTokens: sealed }, key), TOKENS());
+});
+
+test("봉인은 그 유저키로만 풀린다 (저장분만 훔쳐서는 못 쓴다)", () => {
+  const key = userKey();
+  const other = userKey();
+  const stolen = persist.saveSession(FACTS(), TOKENS(), key);
+
+  assert.deepEqual(persist.unsealTokens(stolen, key), TOKENS());
+  assert.throws(() => persist.unsealTokens(stolen, other), /.*/, "다른 키로 풀리면 봉인이 아니다");
 });
 
 test("평문 키·마스터 패스워드는 저장 페이로드에 절대 들어가지 않는다", () => {
@@ -138,16 +186,19 @@ test("평문 키·마스터 패스워드는 저장 페이로드에 절대 들어
   const AUTH_HASH = "QyFNkeOez/m7Ix/LykBkZYNLawEG2/hgb+lKQtl97NU="; // pragma: allowlist secret
 
   // 호출부가 실수로 비밀을 얹은 상황을 그대로 재현한다.
-  persist.saveSession({
-    ...SEED(),
-    masterPassword: MASTER_PASSWORD,
-    userKey: new Uint8Array([1, 2, 3, 4]),
-    userKeyB64: PLAINTEXT_USER_KEY,
-    masterKey: PLAINTEXT_USER_KEY,
-    authHash: AUTH_HASH,
-    sync: { ciphers: [{ name: "평문 이름" }] },
-    orgKeys: { org: PLAINTEXT_USER_KEY },
-  });
+  persist.saveSession(
+    {
+      ...FACTS(),
+      masterPassword: MASTER_PASSWORD,
+      userKey: new Uint8Array([1, 2, 3, 4]),
+      masterKey: PLAINTEXT_USER_KEY,
+      authHash: AUTH_HASH,
+      sync: { ciphers: [{ name: "평문 이름" }] },
+      orgKeys: { org: PLAINTEXT_USER_KEY },
+    },
+    TOKENS(),
+    userKey(),
+  );
 
   const raw = stored();
   assert.deepEqual(Object.keys(JSON.parse(raw)), [...persist.SESSION_FIELDS]);
@@ -166,7 +217,7 @@ test("복호된 키를 encUserKey 자리에 넣으면 저장 단계에서 죽는
   ];
   for (const bad of plaintextKeys) {
     assert.throws(
-      () => persist.saveSession({ ...SEED(), encUserKey: bad }),
+      () => persist.saveSession({ ...FACTS(), encUserKey: bad }, TOKENS(), userKey()),
       /EncString|비어 있거나/,
       `저장이 통과하면 안 된다: ${String(bad).slice(0, 20)}`,
     );
@@ -175,21 +226,60 @@ test("복호된 키를 encUserKey 자리에 넣으면 저장 단계에서 죽는
 });
 
 test("KDF 는 두 변종의 숫자 필드만 옮긴다 (딸려 오는 것 없음)", () => {
-  persist.saveSession({ ...SEED(), kdf: { pBKDF2: { iterations: 600000, masterKey: "secret" } } });
+  persist.saveSession({ ...FACTS(), kdf: { pBKDF2: { iterations: 600000, masterKey: "secret" } } }, TOKENS(), userKey());
   assert.deepEqual(JSON.parse(stored()).kdf, { pBKDF2: { iterations: 600000 } });
 
-  persist.saveSession({
-    ...SEED(),
-    kdf: { argon2id: { iterations: 3, memory: 64, parallelism: 4, password: "secret" } },
-  });
+  persist.saveSession(
+    { ...FACTS(), kdf: { argon2id: { iterations: 3, memory: 64, parallelism: 4, password: "secret" } } },
+    TOKENS(),
+    userKey(),
+  );
   assert.deepEqual(JSON.parse(stored()).kdf, { argon2id: { iterations: 3, memory: 64, parallelism: 4 } });
 
-  assert.throws(() => persist.saveSession({ ...SEED(), kdf: { scrypt: { n: 1 } } }), /KDF/);
+  assert.throws(() => persist.saveSession({ ...FACTS(), kdf: { scrypt: { n: 1 } } }, TOKENS(), userKey()), /KDF/);
 });
 
-test("리프레시 토큰이 없는 세션도 저장·복원된다", () => {
-  persist.saveSession({ ...SEED(), refreshToken: null });
-  assert.equal(persist.loadSession().refreshToken, null);
+test("리프레시 토큰이 없는 세션도 봉인·복원된다", () => {
+  const key = userKey();
+  const s = persist.saveSession(FACTS(), { accessToken: ACCESS_TOKEN, refreshToken: null }, key);
+  assert.deepEqual(persist.unsealTokens(s, key), { accessToken: ACCESS_TOKEN, refreshToken: null });
+});
+
+// ------------------------------------------------ 채택의 원자성 (복호 키 누수 방지)
+
+/** deriveOrgKeys·buildIndex 가 통과할 최소 sync 원문 (조직 없음 → 크립토 호출 없음). */
+const RAW_SYNC = () => ({ profile: { email: "poc@axelabs.ai", key: ENC_USER_KEY }, ciphers: [], folders: [], collections: [] });
+
+test("채택 — 저장까지 성공해야 키와 인덱스를 돌려준다", () => {
+  const key = userKey();
+  const adoption = session.prepareAdoption(RAW_SYNC(), FACTS(), TOKENS(), key);
+
+  assert.equal(adoption.keys.userKey, key);
+  assert.ok(adoption.keys.userKey.some((b) => b !== 0), "성공 경로에서 키를 지우면 안 된다");
+  assert.equal(adoption.data.items.length, 0);
+  assert.deepEqual(Object.keys(JSON.parse(stored())), [...persist.SESSION_FIELDS]);
+});
+
+test("저장이 실패하면 새로 유도한 키는 남지 않는다 (반쯤 채택된 상태 금지)", () => {
+  const key = userKey();
+  // 브라우저에서 실제로 나는 실패: 저장 용량 초과.
+  sessionStub.setItem = () => {
+    throw new DOMException("QuotaExceededError");
+  };
+
+  assert.throws(() => session.prepareAdoption(RAW_SYNC(), FACTS(), TOKENS(), key), /Quota/);
+  // (b) 키 참조 0 — 넘겨준 유저키가 실제로 덮어써졌다. 조직 키도 같은 wipeKeys 로 지워진다.
+  assert.ok(key.every((b) => b === 0), "실패했는데 복호된 유저키가 살아 있다");
+  // (a) 저장분도 화면도 열리지 않는다 — 예외가 그대로 올라가 호출부(useSession.adopt)의
+  //     설치 구간에 도달하지 않으므로 phase 는 login/locked 그대로 남는다.
+  assert.equal(stored(), undefined);
+});
+
+test("저장 페이로드 검사에 걸려도 마찬가지로 키를 지운다", () => {
+  const key = userKey();
+  assert.throws(() => session.prepareAdoption(RAW_SYNC(), { ...FACTS(), encUserKey: "평문" }, TOKENS(), key), /EncString/);
+  assert.ok(key.every((b) => b === 0), "실패했는데 복호된 유저키가 살아 있다");
+  assert.equal(stored(), undefined);
 });
 
 // ------------------------------------------------- 토큰 만료 → 로그인 복귀
@@ -199,7 +289,7 @@ test("서버가 세션을 거부하면(401·invalid_grant) 저장분을 버리�
     new api.HttpError(401, "세션이 만료됐다. 다시 로그인해야 한다.", null),
     new api.HttpError(400, "Unable to refresh login credentials", { error: "invalid_grant" }),
   ]) {
-    persist.saveSession(SEED());
+    persist.saveSession(FACTS(), TOKENS(), userKey());
     assert.ok(api.isAuthRejection(rejection));
     assert.equal(persist.restoreFailurePhase(rejection), "login");
     assert.equal(stored(), undefined, "죽은 세션을 들고 있을 이유가 없다");
@@ -212,7 +302,7 @@ test("네트워크 실패는 세션을 버리지 않는다 — 잠금 화면에 
     new api.HttpError(500, "Internal Server Error", null),
     new api.HttpError(400, "twoFactor", { TwoFactorProviders: [0] }),
   ]) {
-    persist.saveSession(SEED());
+    persist.saveSession(FACTS(), TOKENS(), userKey());
     assert.equal(api.isAuthRejection(transient), false);
     assert.equal(persist.restoreFailurePhase(transient), "locked");
     assert.ok(stored(), "잠깐 끊긴 네트워크가 재로그인을 강요하면 안 된다");

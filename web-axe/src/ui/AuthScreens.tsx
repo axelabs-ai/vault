@@ -66,8 +66,9 @@ function AuthShell({ heading, lead, children }: { heading: string; lead: string;
             <span className="axe-pattern-auth__trust-index">01</span>
             <span>
               <strong lang="en">Keys in memory only</strong> 마스터 패스워드와 복호 키는 메모리에만
-              둡니다. 이 탭에 남는 것은 서버가 이미 가진 것 — 암호문 상태의 유저키와 세션 토큰 —
-              뿐이고, 탭을 닫으면 그것도 사라집니다.
+              둡니다. 이 탭에 남는 것은 암호문뿐입니다 — 유저키는 마스터 패스워드로, 세션 토큰은
+              그 유저키로 감싸여 있어 잠긴 탭에는 쓸 수 있는 것이 없습니다. 탭을 닫으면 그마저
+              사라집니다.
             </span>
           </li>
           <li>
@@ -192,7 +193,7 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
         {/* 새로고침으로 되살린 세션이 서버에 거부됐을 때만 뜬다 — 왜 잠금 화면이 아니라
             로그인 화면으로 왔는지 말해 주지 않으면 사용자는 이유를 알 길이 없다. */}
         {notice && (
-          <StatusBanner tone="error" title="저장된 세션이 만료됐습니다 — 다시 로그인하세요" description={notice} />
+          <StatusBanner tone="error" title="저장된 세션을 이어갈 수 없습니다 — 다시 로그인하세요" description={notice} />
         )}
 
         <button
