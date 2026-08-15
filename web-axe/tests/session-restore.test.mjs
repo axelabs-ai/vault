@@ -50,24 +50,37 @@ globalThis.location = { origin: "https://vault.axelabs.ai", hash: "", pathname: 
 function makeIndexedDb() {
   const dbs = new Map();
   return {
-    open(name) {
+    dbs,
+    open(name, version = 1) {
       const req = { result: null, onsuccess: null, onerror: null, onupgradeneeded: null, onblocked: null };
       setTimeout(() => {
-        let stores = dbs.get(name);
-        const fresh = !stores;
-        if (fresh) dbs.set(name, (stores = new Map()));
+        let db = dbs.get(name);
+        if (!db) dbs.set(name, (db = { version: 0, stores: new Map() }));
+        const stores = db.stores;
+        const upgrade = version > db.version;
         req.result = {
           objectStoreNames: { contains: (s) => stores.has(s) },
           createObjectStore: (s) => stores.set(s, new Map()),
+          deleteObjectStore: (s) => stores.delete(s),
           close: () => {},
           transaction: (store) => {
             const data = stores.get(store);
             const tx = { oncomplete: null, onerror: null, onabort: null };
+            // 요청이 끝날 때마다 커밋하면 **소유권 확인 후 쓰기**(get → onsuccess 안에서 put)를
+            // 흉내낼 수 없다. 진짜 IndexedDB 처럼 pending 이 0이 될 때 한 번만 커밋한다.
+            let pending = 0;
+            let settled = false;
             const request = (fn) => {
-              const r = { result: undefined };
+              const r = { result: undefined, onsuccess: null };
+              pending += 1;
               setTimeout(() => {
                 r.result = fn();
-                tx.oncomplete?.();
+                r.onsuccess?.({ target: r }); // 여기서 새 요청을 걸면 pending 이 다시 오른다
+                pending -= 1;
+                if (pending === 0 && !settled) {
+                  settled = true;
+                  tx.oncomplete?.();
+                }
               }, 0);
               return r;
             };
@@ -80,7 +93,10 @@ function makeIndexedDb() {
             return tx;
           },
         };
-        if (fresh) req.onupgradeneeded?.();
+        if (upgrade) {
+          db.version = version;
+          req.onupgradeneeded?.();
+        }
         req.onsuccess?.();
       }, 0);
       return req;
@@ -102,11 +118,17 @@ before(async () => {
   ({ PureCrypto } = await import("../src/sdk.ts"));
 });
 
+/** 현재 테스트의 IndexedDB 스텁 — 스토어 내부를 직접 들여다볼 때 쓴다. */
+let idb;
+/** 스토어에 남은 레코드 (청소가 두 스토어를 함께 치우는지 보려면 이게 필요하다). */
+const rows = (name) => [...(idb.dbs.get("axe-vault")?.stores.get(name)?.values() ?? [])];
+
 beforeEach(() => {
   store.clear();
   sessionStub.setItem = (k, v) => store.set(k, String(v));
   // 매 테스트가 빈 IndexedDB 에서 시작한다 (탭도 프로필도 새것).
-  globalThis.indexedDB = makeIndexedDb();
+  idb = makeIndexedDb();
+  globalThis.indexedDB = idb;
 });
 
 /** 합성 값 — 실계정·실볼트와 무관하다 (crypto.test.mjs 의 PoC 벡터와 같은 성격). */
@@ -893,7 +915,12 @@ test("IndexedDB 가 없거나 막혀도 크래시 없이 잠금 동작으로 폴
   assert.deepEqual(persist.unsealTokens(persist.loadSession(), key), TOKENS());
 });
 
-test("랩 키는 꺼낼 수 없다 — 저장소를 통째로 떠도 열쇠 바이트가 나오지 않는다", async () => {
+/**
+ * `extractable: false` 가 보장하는 것은 **이 페이지의 JS 가 키 바이트를 읽어 낼 수 없다**는 것
+ * 하나뿐이다. 브라우저 프로필·디스크를 가진 공격자에 대한 at-rest 보호가 아니다 — 그렇게 읽히는
+ * 문구를 코드·화면에 쓰지 않는다(persist.ts 머리 "막는 것과 막지 않는 것").
+ */
+test("랩 키는 이 페이지가 꺼낼 수 없다 (exportKey 거부)", async () => {
   await armed();
   const wrap = await persist.getWrapKey();
 
@@ -1030,6 +1057,66 @@ test("활동이 슬롯의 생존 신호를 갱신한다 (살아 있는 탭이 �
   newTab();
   await persist.sweepStaleWrapSlots(t0 + persist.STALE_SLOT_MS + 5000);
   assert.ok(await slotOf(live), "활동을 보고했는데도 살아 있는 탭의 슬롯이 청소됐다");
+});
+
+test("하트비트는 키 레코드를 건드리지 않는다 (재무장과 겹쳐도 새 랩 키가 살아남는다)", async () => {
+  const first = await armed();
+
+  // 하트비트를 먼저 띄우고(비동기), 그 사이에 재무장이 새 랩 키를 쓴다. 생존 신호가 키와 한
+  // 레코드에 있으면 하트비트의 read-modify-write 가 **새 키를 옛 키로 되돌린다**.
+  persist.markActivity(Date.now() + 10 * 60 * 1000);
+  const second = await armed();
+  await new Promise((r) => setTimeout(r, 30)); // 하트비트가 늦게 착지
+
+  const payload = await persist.takeResume(second.stored);
+  assert.ok(payload, "하트비트가 새 랩 키를 옛 키로 되돌렸다");
+  assert.deepEqual([...payload.userKey], [...second.key]);
+  assert.equal(await persist.takeResume(first.stored), null, "옛 봉인이 되살아났다");
+
+  // 키 레코드에는 생존 시각이 없다 — 애초에 공유하지 않는다.
+  assert.deepEqual(Object.keys(rows("wrap")[0]).sort(), ["id", "key", "owner"]);
+  assert.equal(rows("beat").length, 1);
+});
+
+test("탭 복제 — 나중 인스턴스가 슬롯을 소유하고 이전 인스턴스의 쓰기는 무시된다", async () => {
+  const { key, stored } = await armed();
+
+  // 탭 복제 = sessionStorage(탭 식별자·봉인)가 그대로 복사된 **다른 실행 인스턴스**.
+  // 논스는 메모리에만 있으므로 모듈을 새로 적재하면 그 상황이 된다.
+  const dup = await import("../src/lib/persist.ts?instance=dup");
+
+  // 복제 탭은 그 봉인을 정당하게 연다 (같은 탭의 복사본이다) — 그리고 소유권을 가져간다.
+  const dupPayload = await dup.takeResume(stored);
+  assert.ok(dupPayload, "복제 탭이 자기 봉인을 열지 못했다");
+  assert.deepEqual([...dupPayload.userKey], [...key]);
+
+  // 원본 인스턴스의 쓰기는 이제 걸러진다 → 봉인을 갱신하지 못하고 잠금으로 폴백한다.
+  assert.equal(await persist.armResume(stored, TOKENS(), key), null, "소유권을 잃은 인스턴스가 슬롯을 덮어썼다");
+  assert.deepEqual(persist.loadSession().resume, stored.resume, "덮어쓰지 못했으면 저장분도 그대로여야 한다");
+
+  // 삭제도 마찬가지 — 남의 슬롯은 치우지 않는다.
+  const id = store.get("axe-vault.tab");
+  await persist.dropResume();
+  store.set("axe-vault.tab", id); // 복제 탭의 sessionStorage 는 원본과 별개다
+  assert.ok(await dup.getWrapKey(), "소유권을 잃은 인스턴스가 복제 탭의 랩 키를 지웠다");
+  assert.ok(await dup.takeResume(stored), "복제 탭이 이어가지 못하게 됐다");
+});
+
+test("고아 청소는 슬롯과 생존 신호를 함께 치운다", async () => {
+  const t0 = Date.now();
+  newTab();
+  await armed();
+  const dead = tabSnapshot();
+  assert.equal(rows("wrap").length, 1);
+  assert.equal(rows("beat").length, 1);
+
+  // 그 탭이 청소 없이 사라졌다 (강제 종료·크래시).
+  newTab();
+  await persist.sweepStaleWrapSlots(t0 + persist.STALE_SLOT_MS + 5000);
+
+  assert.equal(await slotOf(dead), null, "죽은 탭의 슬롯이 남았다");
+  assert.deepEqual(rows("wrap"), [], "wrap 스토어에 잔재가 남았다");
+  assert.deepEqual(rows("beat"), [], "beat 스토어에 잔재가 남았다");
 });
 
 test("같은 탭의 새로고침은 같은 슬롯을 다시 쓴다", async () => {
