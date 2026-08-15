@@ -317,9 +317,16 @@ interface LockScreenProps {
   /** SSO 직후처럼 "잠겼다"가 아니라 "2단계"인 맥락에서 문구만 갈아 끼운다. */
   heading?: string;
   lead?: string;
+  /**
+   * SSO 인증만 끝나고 아직 아무것도 봉인하지 못한 구간인가.
+   *
+   * 이때는 "탭에 남은 것은 암호문뿐" 이라는 취지의 문구를 쓰면 **거짓말이 된다** — 봉인 전이라
+   * 인증 결과가 평문으로 메모리에 있고, 저장분은 아예 없다. 그래서 이 구간 전용 문구를 쓴다.
+   */
+  pending?: boolean;
 }
 
-export function LockScreen({ email, onUnlock, onLogout, heading, lead }: LockScreenProps) {
+export function LockScreen({ email, onUnlock, onLogout, heading, lead, pending }: LockScreenProps) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -358,8 +365,9 @@ export function LockScreen({ email, onUnlock, onLogout, heading, lead }: LockScr
             />
           </div>
           <p className="axe-form-field__hint">
-            마스터 패스워드는 서버로 전송되지 않습니다 — 이 탭에 남은 암호문을 여기서 다시 풀
-            뿐입니다. 새로고침해도 이 화면으로 돌아오니, 마스터 패스워드만 다시 넣으면 됩니다.
+            {pending
+              ? "마스터 패스워드는 서버로 전송되지 않습니다. 지금은 인증 결과만 이 탭 메모리에 있고 아직 아무것도 저장되지 않았습니다 — 마스터 패스워드를 넣어야 세션이 봉인돼 저장됩니다. 새로고침하거나 15분이 지나면 SSO 부터 다시 합니다."
+              : "마스터 패스워드는 서버로 전송되지 않습니다 — 이 탭에 남은 암호문을 여기서 다시 풀 뿐입니다. 새로고침해도 이 화면으로 돌아오니, 마스터 패스워드만 다시 넣으면 됩니다."}
           </p>
         </div>
 
@@ -445,6 +453,8 @@ export function SsoScreen({ handoff, email, authenticated, onComplete, onUnlock,
         onLogout={onLogout}
         heading="2단계 · 마스터 패스워드"
         lead={`${email} 로 인증했습니다. 금고 복호에는 마스터 패스워드가 필요합니다.`}
+        // 이 화면은 정의상 SSO 도착 직후다 — 아직 봉인 전이므로 그 사실대로 말한다.
+        pending
       />
     );
   }

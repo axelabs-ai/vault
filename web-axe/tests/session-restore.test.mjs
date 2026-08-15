@@ -444,6 +444,61 @@ test("살아 있는 시도에서는 회전한 토큰이 sync 실패에도 저장
   }
 });
 
+// ------------------------------------- SSO 대기 구간 (봉인 전 평문 토큰) · 시한
+
+/**
+ * SSO 인증 직후 ~ 첫 잠금해제 사이는 토큰을 감쌀 유저키가 없어 **평문 토큰이 메모리에 있는**
+ * 유일한 구간이다. 방치된 탭이 계정 권한(refresh 토큰)을 무기한 들고 있으면 안 되므로 시한이 있고,
+ * 만료·취소·언마운트가 참조를 끊는다. (phase 가 login 으로 가고 배너가 뜨는 것은 useSession 의
+ * 타이머가 forget(SSO_EXPIRED) 을 부르는 구조로 보장된다.)
+ */
+test("SSO 대기 구간에는 시한이 있고, 만료·취소가 평문 토큰 참조를 끊는다", () => {
+  const t0 = 1_000_000;
+  const p = session.startPending(TOKENS(), t0);
+
+  assert.equal(p.expiresAt, t0 + session.SSO_PENDING_MS);
+  assert.equal(session.SSO_PENDING_MS, session.IDLE_LOCK_MS, "방치 시한은 앱 전체에서 한 숫자여야 한다");
+  assert.ok(session.pendingAlive(p, t0 + 1));
+  assert.equal(session.pendingAlive(p, t0 + session.SSO_PENDING_MS), false, "시한이 지난 토큰은 쓰지 않는다");
+
+  session.clearPending(p);
+  assert.equal(p.tokens, null, "만료됐는데 평문 토큰을 계속 들고 있다");
+  assert.equal(session.pendingAlive(p, t0 + 1), false, "비워진 보관함이 살아 있다고 나온다");
+  assert.equal(stored(), undefined, "SSO 대기 구간은 애초에 저장분을 만들지 않는다");
+  assert.match(session.SSO_EXPIRED, /다시 로그인/);
+});
+
+// --------------------------- 복원 세션 vs 서버의 현재 계정 상태 (키 회전 반영)
+
+const syncFor = (key, email) => ({ profile: { email, key }, ciphers: [], folders: [], collections: [] });
+
+test("복원 — 서버에서 키가 회전됐으면 저장분을 폐기하고 전체 로그인을 요구한다", () => {
+  const facts = FACTS();
+  const rotatedKey = "2.bmV3aXY9PQ==|bmV3ZGF0YQ==|bmV3bWFj"; // pragma: allowlist secret
+
+  // 비밀번호·키 회전 = profile.key 가 새 값. 낡은 저장분으로 계속 열어 주면 **폐기된 옛 마스터
+  // 패스워드가 이 탭에서만 통한다**. KDF 변경도 여기서 함께 걸린다(마스터키가 달라지면 서버가
+  // profile.key 를 다시 감싼다).
+  assert.equal(session.staleSessionMetadata(syncFor(rotatedKey, facts.email), facts), true);
+  // 계정 자체가 다른 경우
+  assert.equal(session.staleSessionMetadata(syncFor(facts.encUserKey, "other@axelabs.ai"), facts), true);
+  // 마스터 패스워드가 없는 계정으로 뒤바뀐 경우 / 프로필이 낯선 경우
+  assert.equal(session.staleSessionMetadata({ profile: { email: facts.email } }, facts), true);
+  assert.equal(session.staleSessionMetadata({}, facts), true);
+  assert.match(session.ACCOUNT_CHANGED, /계정 보안 정보가 변경/);
+});
+
+test("복원 — 서버 값이 저장분과 같으면 정상 채택하고 저장을 갱신한다", () => {
+  const facts = FACTS();
+  const raw = syncFor(facts.encUserKey, facts.email);
+  assert.equal(session.staleSessionMetadata(raw, facts), false);
+
+  const key = userKey();
+  const adoption = session.prepareAdoption(raw, facts, TOKENS(), key);
+  assert.ok(adoption.stored.encTokens, "채택이 저장까지 마쳐야 한다");
+  assert.deepEqual(persist.unsealTokens(persist.loadSession(), key), TOKENS());
+});
+
 // -------------------------------------------- 조직 키 유도의 부분 결과 (누수 방지)
 
 /**

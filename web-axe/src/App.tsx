@@ -30,8 +30,17 @@ export default function App({ ssoHandoff }: { ssoHandoff: SsoHandoff | null }) {
     );
   }
 
-  if (session.phase === "locked") {
-    return <LockScreen email={session.email} onUnlock={session.unlock} onLogout={session.logout} />;
+  // "sso-pending" 도 사람에게는 잠금 화면이다. 다만 이 탭이 아직 아무것도 봉인하지 못한
+  // 구간이라(시한부 평문 토큰) 문구가 다르다 — LockScreen 의 `pending` 참조.
+  if (session.phase === "locked" || session.phase === "sso-pending") {
+    return (
+      <LockScreen
+        email={session.email}
+        onUnlock={session.unlock}
+        onLogout={session.logout}
+        pending={session.phase === "sso-pending"}
+      />
+    );
   }
 
   if (session.phase === "unlocked" && session.vault) {

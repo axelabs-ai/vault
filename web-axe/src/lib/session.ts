@@ -9,8 +9,13 @@
  *    무엇이 어떤 모양으로 저장되는지는 lib/persist.ts 한 곳이 정한다.
  *  · **평문 토큰은 금고가 열려 있는 동안에만 메모리에 있다.** 잠그면 키와 함께 버리고, 다음
  *    잠금해제가 유저키로 봉인을 풀어 되찾는다. 잠긴 탭에는 쓸 수 있는 토큰이 존재하지 않는다.
- *    (예외 하나: SSO 인증 직후 ~ 첫 잠금해제 사이. 토큰을 감쌀 유저키가 아직 없어서 메모리에만
- *     들고 있고, 그래서 그 창에서는 **저장도 하지 않는다** — 새로고침하면 로그인부터다.)
+ *    예외는 딱 하나, SSO 인증 직후 ~ 첫 잠금해제 사이다: 토큰을 감쌀 유저키가 아직 없어 메모리에만
+ *    들고 있고 저장도 하지 않는다. 그 구간은 별도 상태(`sso-pending`)로 갈라 **15분 시한**을
+ *    걸었다 — 방치된 탭이 평문 refresh 토큰(=마스터 패스워드 없이 쓰이는 계정 권한)을 무기한
+ *    들고 있지 않게 하기 위해서다. 만료되면 토큰을 버리고 로그인부터 다시 한다.
+ *  · **복원한 세션은 서버의 현재 상태와 대조한 뒤에만 채택한다** (staleSessionMetadata) —
+ *    서버에서 비밀번호·키가 회전됐는데 낡은 저장분으로 계속 열어 주면 폐기된 옛 마스터
+ *    패스워드가 이 탭에서만 통하게 된다.
  *  · localStorage 는 전면 금지. 탭을 닫으면 브라우저가 sessionStorage 를 지우고, 명시적
  *    로그아웃은 우리가 지운다.
  *  · 키는 React state 가 아니라 ref 에 둔다 — 렌더 트리·devtools 에 노출되지 않고, 잠금 시
@@ -53,9 +58,26 @@ import {
   type VaultKeys,
 } from "./vault.ts";
 
-export type Phase = "login" | "unlocked" | "locked";
+/**
+ * `sso-pending` = SSO 인증만 끝나고 아직 첫 잠금해제 전. 겉보기에는 잠금 화면이지만 내부 사정이
+ * 다르다 — 토큰을 감쌀 유저키가 아직 없어 **평문 토큰이 메모리에 있고 저장분은 없다**. 그래서
+ * 상태를 갈라 두고 시한을 건다(아래 SSO_PENDING_MS). 화면 문구도 이 구간만 다르다.
+ */
+export type Phase = "login" | "unlocked" | "locked" | "sso-pending";
 
 export const IDLE_LOCK_MS = 15 * 60 * 1000;
+
+/**
+ * SSO 인증 후 마스터 패스워드를 받기까지의 시한.
+ *
+ * 유휴 자동잠금과 **같은 15분**으로 맞춘다: 방치된 탭이 비밀을 들고 있을 수 있는 시간을 이 앱에서
+ * 하나의 숫자로 유지하기 위해서다(둘이 다르면 "이 탭은 언제까지 위험한가"에 답이 두 개가 된다).
+ * 이 구간은 오히려 유휴 잠금보다 노출이 크다 — 평문 refresh 토큰 = 마스터 패스워드 없이도 쓰이는
+ * 계정 권한이므로, 넉넉하게 잡을 이유가 없다. 사용자는 방금 인증을 끝내고 곧바로 마스터
+ * 패스워드를 넣는 흐름이라 15분은 충분히 여유롭다.
+ */
+export const SSO_PENDING_MS = IDLE_LOCK_MS;
+
 const ACTIVITY_EVENTS = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
 
 const NO_MASTER_PASSWORD =
@@ -63,6 +85,57 @@ const NO_MASTER_PASSWORD =
 const NO_SESSION = "잠금 해제할 세션이 없다. 다시 로그인하라.";
 const WRONG_PASSWORD = "마스터 패스워드가 맞지 않습니다. 다시 입력하세요.";
 const BROKEN_SESSION = "저장된 세션이 손상돼 복원할 수 없습니다. 다시 로그인하세요.";
+export const SSO_EXPIRED = "SSO 인증이 만료됐습니다. 처음부터 다시 로그인하세요.";
+export const ACCOUNT_CHANGED =
+  "계정 보안 정보가 변경됐습니다(마스터 패스워드 또는 키 회전). 이 탭의 세션은 더 이상 쓸 수 없으니 다시 로그인하세요.";
+
+/**
+ * SSO 인증만 끝난 구간의 보관함 — 이 앱에서 **봉인되지 않은 평문 토큰이 존재하는 유일한 자리**다.
+ * 그래서 값과 함께 시한을 들고 다닌다. 만료·취소·언마운트가 `clearPending` 으로 참조를 끊는다.
+ *
+ * 한계(정직하게): 토큰은 JS 문자열이라 Uint8Array 처럼 덮어쓸 수 없다. 우리가 할 수 있는 것은
+ * 참조를 끊어 GC 에 넘기는 것뿐이고, 그래서 애초에 **이 구간을 짧게 유지하는 것**이 방어다.
+ */
+export interface Pending {
+  tokens: TokenPair | null;
+  expiresAt: number;
+}
+
+export const startPending = (tokens: TokenPair, now = Date.now()): Pending => ({
+  tokens,
+  expiresAt: now + SSO_PENDING_MS,
+});
+
+export const pendingAlive = (p: Pending | null, now = Date.now()): boolean =>
+  !!p?.tokens && now < p.expiresAt;
+
+export function clearPending(p: Pending | null): void {
+  if (!p) return;
+  p.tokens = null;
+  p.expiresAt = 0;
+}
+
+/**
+ * 복원한 저장분이 **서버의 현재 계정 상태**와 같은가.
+ *
+ * 서버에서 마스터 패스워드나 키가 회전되면 `profile.key`(마스터 패스워드로 감싼 유저키)가 새
+ * 값으로 바뀐다. 저장분의 낡은 `encUserKey` 로 계속 열어 주면 **폐기된 옛 마스터 패스워드가 이
+ * 탭에서만 계속 통한다** — 회전의 의미가 사라진다. 그래서 sync 를 받은 **직후, 채택 전에** 대조한다.
+ *
+ * KDF 파라미터도 이 한 번의 비교로 함께 걸린다: KDF 가 바뀌면 마스터키가 달라지고 서버는
+ * `profile.key` 를 새 마스터키로 다시 감싸므로 값이 반드시 달라진다 (sync 프로필에는 KDF 필드가
+ * 없다 — fork 소스 db/models/user.rs `to_json` 은 email·key·privateKey·securityStamp 만 낸다).
+ * 계정 식별자(email)도 함께 본다 — 같은 오리진에서 계정이 바뀐 저장분을 쓰지 않기 위해서다.
+ */
+export function staleSessionMetadata(raw: Record<string, unknown>, facts: SessionFacts): boolean {
+  const freshKey = wrappedUserKey(raw);
+  if (!freshKey || freshKey !== facts.encUserKey) return true;
+  try {
+    return profileEmail(raw) !== facts.email;
+  } catch {
+    return true;
+  }
+}
 
 export interface Adoption {
   keys: VaultKeys;
@@ -227,6 +300,8 @@ export function useSession(): Session {
   const factsRef = useRef<SessionFacts | null>(boot.session);
   /** 평문 토큰 — 금고가 열려 있는 동안만. 잠그면 버리고 봉인에서 되찾는다. */
   const tokensRef = useRef<TokenPair | null>(null);
+  /** SSO 인증만 끝난 구간의 보관함(시한 포함). 이 밖에서는 봉인되지 않은 토큰을 두지 않는다. */
+  const pendingRef = useRef<Pending | null>(null);
   /** sessionStorage 에 있는 것의 메모리 사본. */
   const storedRef = useRef<StoredSession | null>(boot.session);
   /**
@@ -270,6 +345,8 @@ export function useSession(): Session {
     epochRef.current++;
     clearSession();
     dropKeys();
+    clearPending(pendingRef.current);
+    pendingRef.current = null;
     rawSyncRef.current = null;
     factsRef.current = null;
     tokensRef.current = null;
@@ -285,10 +362,13 @@ export function useSession(): Session {
     cancelWork();
     epochRef.current++;
     clearSession();
+    clearPending(pendingRef.current);
+    pendingRef.current = null;
     rawSyncRef.current = null;
     factsRef.current = null;
     tokensRef.current = null;
     storedRef.current = null;
+    setVault(null);
     setEmail("");
     setNotice(reason);
     setPhase("login");
@@ -302,6 +382,9 @@ export function useSession(): Session {
     (raw: Record<string, unknown>, facts: SessionFacts, tokens: TokenPair, userKey: Uint8Array) => {
       const { keys, data, stored } = prepareAdoption(raw, facts, tokens, userKey);
       dropKeys();
+      // 봉인이 끝났으니 시한 있는 평문 보관함은 더 이상 필요 없다.
+      clearPending(pendingRef.current);
+      pendingRef.current = null;
       keysRef.current = keys;
       rawSyncRef.current = raw;
       factsRef.current = facts;
@@ -349,17 +432,20 @@ export function useSession(): Session {
       const mail = profileEmail(raw);
 
       // 인증만 끝났다. 키는 아직 없다 — rawSync 는 통째로 암호문이고, 잠금해제가 마스터
-      // 패스워드로 유저키를 유도해야 열린다. 그래서 로그인 직후 상태가 정확히 "locked" 다.
-      // 저장은 하지 않는다: 토큰을 감쌀 유저키가 없으니 저장하려면 평문이어야 하고, 그건 하지
-      // 않기로 한 바로 그것이다. 첫 잠금해제가 봉인해서 저장한다.
+      // 패스워드로 유저키를 유도해야 열린다. 저장은 하지 않는다: 토큰을 감쌀 유저키가 없으니
+      // 저장하려면 평문이어야 하고, 그건 하지 않기로 한 바로 그것이다. 첫 잠금해제가 봉인해서
+      // 저장한다. 그때까지 평문 토큰은 **시한이 붙은 보관함**에만 둔다 — 이 구간이 phase
+      // "sso-pending" 이고, 만료되면 토큰을 버리고 로그인부터 다시 한다.
       dropKeys();
       rawSyncRef.current = raw;
       factsRef.current = { email: mail, kdf: auth.kdf, encUserKey };
-      tokensRef.current = { accessToken: auth.accessToken, refreshToken: auth.refreshToken };
+      tokensRef.current = null;
+      clearPending(pendingRef.current);
+      pendingRef.current = startPending({ accessToken: auth.accessToken, refreshToken: auth.refreshToken });
       setEmail(mail);
       setVault(null);
       setNotice(null);
-      setPhase("locked");
+      setPhase("sso-pending");
     },
     [dropKeys],
   );
@@ -395,7 +481,17 @@ export function useSession(): Session {
       attempt.secrets.push(userKey);
       workRef.current = attempt;
 
-      let tokens = tokensRef.current;
+      // 토큰의 출처는 셋 중 하나다: 열려 있는 동안의 메모리 사본, SSO 대기 보관함(시한 검사),
+      // 그리고 저장분의 봉인. 어느 쪽도 없으면 열 세션이 없는 것이다.
+      const pending = pendingRef.current;
+      if (pending?.tokens && !pendingAlive(pending)) {
+        // 시한이 지났는데 타이머가 못 돌았다(탭 절전 등). 여기서 확실히 끊는다.
+        userKey.fill(0);
+        forget(SSO_EXPIRED);
+        throw new Error(SSO_EXPIRED);
+      }
+
+      let tokens = tokensRef.current ?? pending?.tokens ?? null;
       if (!tokens) {
         const stored = storedRef.current;
         if (!stored) {
@@ -426,6 +522,13 @@ export function useSession(): Session {
         }
         // 설치 직전 마지막 대조 — 여기부터 adopt 끝까지 await 가 없어 원자적이다.
         if (!attempt.live()) return;
+        // 서버가 방금 준 값과 저장분이 다르면(비밀번호·키 회전) 이 세션은 죽은 것이다.
+        // 그대로 열어 주면 폐기된 옛 마스터 패스워드가 이 탭에서만 계속 통한다.
+        if (staleSessionMetadata(raw, facts)) {
+          userKey.fill(0);
+          forget(ACCOUNT_CHANGED);
+          return;
+        }
         adopt(raw, facts, tokens, userKey);
       } catch (e) {
         // 취소됐다면 키는 cancelAttempt 가 이미 지웠고, 화면도 더 이상 내 것이 아니다.
@@ -450,6 +553,20 @@ export function useSession(): Session {
     return revealItem(item, keys, fields);
   }, []);
 
+  /**
+   * SSO 대기 시한. 이 구간에서만 평문 토큰이 봉인 없이 메모리에 있으므로, 방치된 탭이 계정 권한을
+   * 무기한 들고 있지 않게 시계를 건다. 만료되면 토큰 참조를 끊고 사유와 함께 로그인 화면으로.
+   * (유휴 잠금과 달리 활동으로 연장되지 않는다 — 이 창은 "곧 마스터 패스워드를 넣는다"는 전제
+   *  위에서만 존재한다.)
+   */
+  useEffect(() => {
+    if (phase !== "sso-pending") return;
+    const p = pendingRef.current;
+    if (!p) return;
+    const timer = setTimeout(() => forget(SSO_EXPIRED), Math.max(0, p.expiresAt - Date.now()));
+    return () => clearTimeout(timer);
+  }, [phase, forget]);
+
   // 유휴 자동 잠금. 잠금 상태에서는 타이머를 걸지 않는다 (더 잠글 게 없다).
   useEffect(() => {
     if (phase !== "unlocked") return;
@@ -472,6 +589,8 @@ export function useSession(): Session {
     () => () => {
       cancelWork();
       dropKeys();
+      clearPending(pendingRef.current);
+      pendingRef.current = null;
     },
     [cancelWork, dropKeys],
   );
