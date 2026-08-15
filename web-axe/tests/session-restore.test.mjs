@@ -63,8 +63,9 @@ function makeIndexedDb() {
           createObjectStore: (s) => stores.set(s, new Map()),
           deleteObjectStore: (s) => stores.delete(s),
           close: () => {},
-          transaction: (store) => {
-            const data = stores.get(store);
+          // 스토어 하나 또는 여럿(판정과 삭제를 한 트랜잭션에 담는 경로)을 받는다.
+          transaction: (names) => {
+            const scope = new Set(Array.isArray(names) ? names : [names]);
             const tx = { oncomplete: null, onerror: null, onabort: null };
             // 요청이 끝날 때마다 커밋하면 **소유권 확인 후 쓰기**(get → onsuccess 안에서 put)를
             // 흉내낼 수 없다. 진짜 IndexedDB 처럼 pending 이 0이 될 때 한 번만 커밋한다.
@@ -84,12 +85,16 @@ function makeIndexedDb() {
               }, 0);
               return r;
             };
-            tx.objectStore = () => ({
-              put: (v, k) => request(() => void data.set(k, v)),
-              get: (k) => request(() => data.get(k)),
-              delete: (k) => request(() => void data.delete(k)),
-              getAll: () => request(() => [...data.values()]),
-            });
+            tx.objectStore = (name) => {
+              if (!scope.has(name)) throw new Error(`NotFoundError: ${name} 는 이 트랜잭션 범위 밖이다`);
+              const data = stores.get(name);
+              return {
+                put: (v, k) => request(() => void data.set(k, v)),
+                get: (k) => request(() => data.get(k)),
+                delete: (k) => request(() => void data.delete(k)),
+                getAll: () => request(() => [...data.values()]),
+              };
+            };
             return tx;
           },
         };
@@ -755,20 +760,27 @@ test("서버가 세션을 거부하면(401·invalid_grant) 저장분을 버리�
  * JS 가 꺼낼 수 없는 CryptoKey)와 짝일 때만 열리고, 유휴 15분·수동 잠금·로그아웃·탭 닫기 중
  * 하나라도 일어나면 사라져야 한다. 하나라도 새면 "잠금" 이라는 말이 거짓이 된다.
  */
-const armed = async (key = userKey(), tokens = TOKENS()) => {
-  const s = persist.saveSession(FACTS(), tokens, key);
-  const next = await persist.armResume(s, tokens, key);
+const armIn = async (mod, key = userKey(), tokens = TOKENS()) => {
+  const s = mod.saveSession(FACTS(), tokens, key);
+  const next = await mod.armResume(s, tokens, key);
   assert.ok(next?.resume, "봉인이 만들어지지 않았다");
   return { key, stored: next };
 };
+const armed = (key, tokens) => armIn(persist, key, tokens);
 
 /**
- * 탭 = **자기 sessionStorage 를 가진 실행 단위**. IndexedDB 는 오리진이 공유한다 — 그래서
+ * 탭 = **자기 sessionStorage + 자기 실행 인스턴스**. IndexedDB 는 오리진이 공유한다 — 그래서
  * 랩 키를 슬롯 하나에 두면 한 탭의 로그아웃·재무장이 다른 탭의 봉인을 못 열게 만든다.
- * 여기서는 sessionStorage 스냅샷을 갈아 끼워 그 구조를 그대로 재현한다.
+ * 여기서는 sessionStorage 스냅샷을 갈아 끼우고(저장소) 모듈을 새로 적재해(메모리 캡처)
+ * 그 구조를 그대로 재현한다 — 세대 캡처는 실행마다 따로여야 의미가 있다.
  */
 const tabSnapshot = () => new Map(store);
 const newTab = () => store.clear();
+let tabSeq = 0;
+const openTab = async () => {
+  store.clear();
+  return await import(`../src/lib/persist.ts?tab=${++tabSeq}`);
+};
 const enterTab = (snap) => {
   store.clear();
   for (const [k, v] of snap) store.set(k, v);
@@ -991,9 +1003,9 @@ test("탭 A 의 로그아웃이 탭 B 의 이어가기를 깨뜨리지 않는다
   const a = await armed();
   const tabA = tabSnapshot();
 
-  // 탭 B — 같은 오리진의 다른 탭 (sessionStorage 는 자기 것, IndexedDB 는 공유).
-  newTab();
-  const b = await armed();
+  // 탭 B — 같은 오리진의 다른 탭 (sessionStorage 도 실행 인스턴스도 자기 것, IndexedDB 는 공유).
+  const modB = await openTab();
+  const b = await armIn(modB);
   const tabB = tabSnapshot();
   assert.notEqual(tabA.get("axe-vault.tab"), tabB.get("axe-vault.tab"), "두 탭이 같은 슬롯을 쓴다");
 
@@ -1005,30 +1017,30 @@ test("탭 A 의 로그아웃이 탭 B 의 이어가기를 깨뜨리지 않는다
 
   // 탭 B 는 아무 일도 없었다는 듯 이어간다.
   enterTab(tabB);
-  assert.equal(persist.restoreSession().phase, "resuming");
-  const payload = await persist.takeResume(b.stored);
+  assert.equal(modB.restoreSession().phase, "resuming");
+  const payload = await modB.takeResume(b.stored);
   assert.ok(payload, "A 의 로그아웃이 B 의 봉인을 못 열게 만들었다");
   assert.deepEqual([...payload.userKey], [...b.key]);
   assert.notDeepEqual([...b.key], [...a.key], "두 탭이 같은 키를 봉인했다 — 시나리오가 무의미하다");
 });
 
-test("고아 청소는 살아 있는 다른 탭의 슬롯을 지우지 않는다", async () => {
-  newTab();
-  const b = await armed();
+test("청소는 살아 있는 다른 탭의 슬롯을 지우지 않는다", async () => {
+  const modB = await openTab();
+  const b = await armIn(modB);
   const tabB = tabSnapshot();
 
-  // 탭 A — 봉인 없는 부팅(로그인 화면). 자기 슬롯 폐기 + 죽은 슬롯 청소를 한다.
-  newTab();
-  assert.equal(persist.restoreSession().phase, "login");
-  await persist.dropResume();
-  await persist.sweepStaleWrapSlots();
+  // 탭 A — 봉인 없는 부팅(로그인 화면). 자기 슬롯 폐기 + 오래된 슬롯 청소를 한다.
+  const modA = await openTab();
+  assert.equal(modA.restoreSession().phase, "login");
+  await modA.dropResume();
+  await modA.sweepStaleWrapSlots();
 
   enterTab(tabB);
   assert.ok(await persist.getWrapKey(), "최근까지 살아 있던 탭의 슬롯을 지웠다");
-  assert.ok(await persist.takeResume(b.stored), "B 가 이어가지 못하게 됐다");
+  assert.ok(await modB.takeResume(b.stored), "B 가 이어가지 못하게 됐다");
 });
 
-test("유휴 마감 + 여유를 넘도록 조용한 슬롯은 청소된다 (탭이 청소 없이 사라진 경우)", async () => {
+test("오래 조용한 슬롯은 청소된다 (탭이 청소 없이 사라진 경우)", async () => {
   const t0 = Date.now();
   newTab();
   await armed();
@@ -1036,12 +1048,15 @@ test("유휴 마감 + 여유를 넘도록 조용한 슬롯은 청소된다 (탭�
 
   // 그 탭이 강제 종료됐다 = 암호문(sessionStorage)은 사라지고 슬롯만 남는다.
   newTab();
-  await persist.sweepStaleWrapSlots(t0 + persist.STALE_SLOT_MS - 5000);
-  assert.ok(await slotOf(dead), "아직 마감+여유를 넘지 않았는데 지웠다");
+  await persist.sweepStaleWrapSlots(t0 + persist.SLOT_TTL_MS - 5000);
+  assert.ok(await slotOf(dead), "아직 TTL 을 넘지 않았는데 지웠다");
 
-  await persist.sweepStaleWrapSlots(t0 + persist.STALE_SLOT_MS + 5000);
+  await persist.sweepStaleWrapSlots(t0 + persist.SLOT_TTL_MS + 5000);
   assert.equal(await slotOf(dead), null, "죽은 탭의 슬롯이 남았다");
-  assert.equal(persist.STALE_SLOT_MS, persist.IDLE_LOCK_MS + persist.SLOT_GRACE_MS);
+  // TTL 은 넉넉하다 — 청소는 위생이지 보안 경계가 아니다(암호문이 이미 없다).
+  // 진짜 경계인 유휴 잠금은 그것과 무관하게 짧다.
+  assert.ok(persist.SLOT_TTL_MS >= 24 * 60 * 60 * 1000);
+  assert.equal(persist.IDLE_LOCK_MS, 15 * 60 * 1000, "유휴 잠금은 TTL 과 함께 늘어나면 안 된다");
 });
 
 test("활동이 슬롯의 생존 신호를 갱신한다 (살아 있는 탭이 청소되지 않는 이유)", async () => {
@@ -1050,13 +1065,50 @@ test("활동이 슬롯의 생존 신호를 갱신한다 (살아 있는 탭이 �
   await armed();
   const live = tabSnapshot();
 
-  // 마감선 직전의 활동 — 유휴 잠금은 이걸로 연장되고, 슬롯 나이도 같이 젊어져야 한다.
-  persist.markActivity(t0 + persist.STALE_SLOT_MS - 1000);
+  // TTL 직전의 활동 — 슬롯 나이가 같이 젊어져야 한다.
+  persist.markActivity(t0 + persist.SLOT_TTL_MS - 1000);
   await new Promise((r) => setTimeout(r, 20)); // 생존 신호는 비동기다
 
   newTab();
-  await persist.sweepStaleWrapSlots(t0 + persist.STALE_SLOT_MS + 5000);
+  await persist.sweepStaleWrapSlots(t0 + persist.SLOT_TTL_MS + 500);
   assert.ok(await slotOf(live), "활동을 보고했는데도 살아 있는 탭의 슬롯이 청소됐다");
+});
+
+test("스윕은 삭제 직전에 다시 확인한다 — 그 사이 되살아난 탭은 지우지 않는다", async () => {
+  const t0 = Date.now();
+  newTab();
+  await armed();
+  const dead = tabSnapshot();
+  newTab();
+
+  // 스윕이 생존 신호를 **다시 읽는** 그 순간, 그 탭이 막 되살아났다.
+  const sweepAt = t0 + persist.SLOT_TTL_MS + 5000;
+  const beats = idb.dbs.get("axe-vault").stores.get("beat");
+  const id = [...beats.values()][0].id;
+  const origGet = beats.get.bind(beats);
+  beats.get = (k) => (k === id ? { id: k, at: sweepAt } : origGet(k));
+  await persist.sweepStaleWrapSlots(sweepAt);
+  beats.get = origGet;
+
+  assert.ok(await slotOf(dead), "삭제 직전 재확인이 없다 — 되살아난 탭의 슬롯을 지웠다");
+});
+
+test("스윕은 그 사이 다시 무장된 슬롯을 지우지 않는다 (세대 재대조)", async () => {
+  const t0 = Date.now();
+  newTab();
+  await armed();
+  const tab = tabSnapshot();
+  newTab();
+
+  // 스윕이 세대를 **다시 읽는** 순간, 그 탭이 새 세대로 다시 무장했다.
+  const slots = idb.dbs.get("axe-vault").stores.get("wrap");
+  const [slot] = [...slots.values()];
+  const origGet = slots.get.bind(slots);
+  slots.get = (k) => (k === slot.id ? { ...slot, gen: "새-세대" } : origGet(k));
+  await persist.sweepStaleWrapSlots(t0 + persist.SLOT_TTL_MS + 5000);
+  slots.get = origGet;
+
+  assert.ok(await slotOf(tab), "세대 재대조가 없다 — 방금 다시 무장한 슬롯을 지웠다");
 });
 
 test("하트비트는 키 레코드를 건드리지 않는다 (재무장과 겹쳐도 새 랩 키가 살아남는다)", async () => {
@@ -1074,32 +1126,45 @@ test("하트비트는 키 레코드를 건드리지 않는다 (재무장과 겹�
   assert.equal(await persist.takeResume(first.stored), null, "옛 봉인이 되살아났다");
 
   // 키 레코드에는 생존 시각이 없다 — 애초에 공유하지 않는다.
-  assert.deepEqual(Object.keys(rows("wrap")[0]).sort(), ["id", "key", "owner"]);
+  assert.deepEqual(Object.keys(rows("wrap")[0]).sort(), ["gen", "id", "key"]);
   assert.equal(rows("beat").length, 1);
 });
 
-test("탭 복제 — 나중 인스턴스가 슬롯을 소유하고 이전 인스턴스의 쓰기는 무시된다", async () => {
-  const { key, stored } = await armed();
+/**
+ * 세대(gen) 하나가 "누가 이 슬롯을 흔들어도 되는가" 를 전부 답한다. 삭제는 언제나 *시작
+ * 시점에 캡처한* (id, gen) 로만 하므로, 그 사이 누가 다시 무장했으면 그 삭제는 조용히
+ * 아무 일도 하지 않는다 — 뒤늦은 청소가 갓 만든 슬롯을 치는 사고가 구조적으로 불가능하다.
+ *
+ * 탭 복제(Duplicate Tab)는 이 규칙의 한 사례일 뿐이다: sessionStorage(탭 식별자·봉인)가
+ * 복사돼 두 실행이 같은 슬롯을 가리키지만, 나중에 무장한 쪽이 현재 세대를 갖는다.
+ */
+test("캡처한 세대와 다른 세대의 슬롯은 지우지 않는다 (뒤늦은 청소·탭 복제)", async () => {
+  const first = await armed(); // 이 실행이 1세대를 쥔다
 
-  // 탭 복제 = sessionStorage(탭 식별자·봉인)가 그대로 복사된 **다른 실행 인스턴스**.
-  // 논스는 메모리에만 있으므로 모듈을 새로 적재하면 그 상황이 된다.
+  // 다른 실행(복제 탭) — 메모리 캡처는 복사되지 않으므로 모듈을 새로 적재하면 그 상황이 된다.
   const dup = await import("../src/lib/persist.ts?instance=dup");
 
-  // 복제 탭은 그 봉인을 정당하게 연다 (같은 탭의 복사본이다) — 그리고 소유권을 가져간다.
-  const dupPayload = await dup.takeResume(stored);
-  assert.ok(dupPayload, "복제 탭이 자기 봉인을 열지 못했다");
-  assert.deepEqual([...dupPayload.userKey], [...key]);
+  // 복제 탭은 그 봉인을 정당하게 연다 (같은 탭의 복사본이다) — 그리고 세대를 잡는다.
+  const opened = await dup.takeResume(first.stored);
+  assert.ok(opened, "복제 탭이 자기 봉인을 열지 못했다");
+  assert.deepEqual([...opened.userKey], [...first.key]);
 
-  // 원본 인스턴스의 쓰기는 이제 걸러진다 → 봉인을 갱신하지 못하고 잠금으로 폴백한다.
-  assert.equal(await persist.armResume(stored, TOKENS(), key), null, "소유권을 잃은 인스턴스가 슬롯을 덮어썼다");
-  assert.deepEqual(persist.loadSession().resume, stored.resume, "덮어쓰지 못했으면 저장분도 그대로여야 한다");
+  // 복제 탭이 다시 무장하면 2세대가 된다 (마지막에 쓴 쪽이 현재 주인이다).
+  const k2 = userKey();
+  const second = await dup.armResume(persist.saveSession(FACTS(), TOKENS(), k2), TOKENS(), k2);
+  assert.ok(second?.resume);
 
-  // 삭제도 마찬가지 — 남의 슬롯은 치우지 않는다.
-  const id = store.get("axe-vault.tab");
+  // 1세대를 쥔 실행의 폐기는 이제 아무 일도 하지 않는다.
   await persist.dropResume();
-  store.set("axe-vault.tab", id); // 복제 탭의 sessionStorage 는 원본과 별개다
-  assert.ok(await dup.getWrapKey(), "소유권을 잃은 인스턴스가 복제 탭의 랩 키를 지웠다");
-  assert.ok(await dup.takeResume(stored), "복제 탭이 이어가지 못하게 됐다");
+  const id = store.get("axe-vault.tab");
+  assert.ok(id, "남의 세대가 자리를 지키면 탭 식별자도 버리지 않는다");
+  assert.ok(await dup.getWrapKey(), "옛 세대 캡처가 새 슬롯을 지웠다");
+  const still = await dup.takeResume(second);
+  assert.ok(still, "새 세대의 봉인이 열리지 않는다");
+  assert.deepEqual([...still.userKey], [...k2]);
+
+  // 그리고 옛 봉인은 더 이상 열리지 않는다 — 그 실행은 다음 부팅에 잠금으로 떨어진다.
+  assert.equal(await dup.takeResume(first.stored), null, "옛 봉인이 아직 열린다");
 });
 
 test("고아 청소는 슬롯과 생존 신호를 함께 치운다", async () => {
@@ -1112,11 +1177,37 @@ test("고아 청소는 슬롯과 생존 신호를 함께 치운다", async () =>
 
   // 그 탭이 청소 없이 사라졌다 (강제 종료·크래시).
   newTab();
-  await persist.sweepStaleWrapSlots(t0 + persist.STALE_SLOT_MS + 5000);
+  await persist.sweepStaleWrapSlots(t0 + persist.SLOT_TTL_MS + 5000);
 
   assert.equal(await slotOf(dead), null, "죽은 탭의 슬롯이 남았다");
   assert.deepEqual(rows("wrap"), [], "wrap 스토어에 잔재가 남았다");
   assert.deepEqual(rows("beat"), [], "beat 스토어에 잔재가 남았다");
+});
+
+test("만료 봉인의 부팅 청소는 세대를 먼저 잡고 지운다 (실패해도 앱 흐름은 그대로)", async () => {
+  const { key } = await armed();
+  const me = tabSnapshot();
+
+  // 새로고침 = 같은 sessionStorage + **새 실행**(아직 아무 세대도 쥐지 않았다).
+  const boot = await openTab();
+  enterTab(me);
+
+  // 유휴 만료 부팅 — restoreSession 이 봉인을 걷고, dropResume 이 claim → (id, gen) CAS 삭제.
+  assert.equal(boot.restoreSession(Date.now() + persist.IDLE_LOCK_MS + 1).phase, "locked");
+  await boot.dropResume();
+  assert.equal(await slotOf(me), null, "잡지 않고 지우려 했다 — 만료 봉인의 슬롯이 남았다");
+
+  // 잠금 폴백은 그대로다 — 마스터 패스워드로 연다.
+  assert.deepEqual(persist.unsealTokens(persist.loadSession(), key), TOKENS());
+
+  // 청소가 실패하는 환경(저장소 차단)에서도 던지지 않는다 — 위생 문제일 뿐이다.
+  globalThis.indexedDB = {
+    open() {
+      throw new DOMException("The operation is insecure.", "SecurityError");
+    },
+  };
+  await assert.doesNotReject(() => boot.dropResume());
+  assert.equal(boot.restoreSession().phase, "locked", "청소 실패가 부팅을 흔들었다");
 });
 
 test("같은 탭의 새로고침은 같은 슬롯을 다시 쓴다", async () => {

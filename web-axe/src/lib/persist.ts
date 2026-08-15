@@ -88,21 +88,22 @@ export const SESSION_SCHEMA = 3;
 export const IDLE_LOCK_MS = 15 * 60 * 1000;
 
 /**
- * 남의 탭 슬롯을 청소해도 되는 나이.
+ * 남겨진 슬롯을 치우는 나이 — **위생이지 보안 경계가 아니다.**
  *
- * 다른 탭의 슬롯은 **지워도 되는지 직접 확인할 방법이 없다** — 그 탭의 sessionStorage(=봉인
- * 암호문)를 우리는 볼 수 없기 때문이다. 대신 나이로 판정한다: 살아 있는 탭은 활동 때마다
- * 생존 신호를 갱신하고, 유휴 한도를 넘긴 탭은 **스스로 잠기면서 자기 슬롯을 지운다.**
- * 그러므로 유휴 한도 + 여유를 넘도록 조용한 슬롯은 청소 없이 사라지지 못한 것(탭 강제 종료·
- * 크래시)이고, 그 슬롯의 짝이 되는 암호문은 이미 세상에 없다.
+ * 이 값이 커도 위험해지지 않는 이유가 이 하위 시스템 전체의 열쇠다: **봉인 암호문 없이 남은
+ * 랩 키는 아무것도 복호하지 못한다.** 암호문은 sessionStorage 에 있어 탭과 함께 죽으므로,
+ * 주인 없는 슬롯은 이미 열 것이 없는 손잡이다. 청소의 목적은 저장소가 무한히 늘지 않게 하는
+ * 것뿐이다.
  *
- * 여유(5분)는 생존 신호 갱신 간격(TOUCH_INTERVAL_MS)과 시계 오차를 덮는다.
+ * 그래서 **넉넉하게** 잡는다(24시간). 오탐(살아 있는 탭의 슬롯을 지움)의 결과는 "그 탭이 다음
+ * 새로고침 때 마스터 패스워드를 한 번 더 받는다" 이고, 미탐의 결과는 "쓸모없는 레코드 하나가
+ * 하루 더 남는다" 다. 공격적으로 지울 이유가 없다.
+ * (진짜 보안 경계는 **유휴 15분 잠금**이고 그건 그대로다 — IDLE_LOCK_MS.)
  */
-export const SLOT_GRACE_MS = 5 * 60 * 1000;
-export const STALE_SLOT_MS = IDLE_LOCK_MS + SLOT_GRACE_MS;
+export const SLOT_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** 생존 신호 갱신 최소 간격 — 활동 이벤트마다 IndexedDB 를 두드리지 않기 위해서다. */
-const TOUCH_INTERVAL_MS = 60 * 1000;
+const TOUCH_INTERVAL_MS = 5 * 60 * 1000;
 
 /**
  * 잠금 상태에서도 들고 있어도 되는 사실. 전부 서버가 아는 값이고, 이것만으로는 아무것도 못 연다.
@@ -340,15 +341,6 @@ const IV_BYTES = 12;
 type TxResult<T> = { ok: true; value: T | undefined } | { ok: false };
 
 /**
- * 이 **실행 인스턴스**의 논스.
- *
- * 메모리에만 있고 부팅마다 새로 만든다 — sessionStorage 에 두면 탭 복제(Duplicate Tab·
- * `window.open` opener)가 그대로 복사해 두 탭이 같은 신원을 갖는다. 그게 정확히 이 논스가
- * 막는 것이다: 탭 식별자는 복제되지만 이 값은 복제되지 않는다.
- */
-const INSTANCE = crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
-
-/**
  * 한 탭의 랩 키 슬롯.
  *
  * `id` 를 값 안에도 두는 것은 중복이지만 의도적이다 — 청소가 `getAll()` **한 번**으로 끝나
@@ -357,9 +349,25 @@ const INSTANCE = crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Mat
 interface WrapSlot {
   id: string;
   key: CryptoKey;
-  /** 이 슬롯을 소유한 실행 인스턴스. 쓰기·삭제는 이 값이 나와 같을 때만 일어난다. */
-  owner: string;
+  /**
+   * 이 슬롯의 **세대** — 무장할 때마다 새로 만든다.
+   *
+   * 이 값 하나가 "누가 이 슬롯을 흔들어도 되는가" 를 전부 답한다. 삭제는 언제나 *시작 시점에
+   * 캡처한* (id, gen) 로만 하므로, 그 사이 누가 다시 무장했다면(세대가 달라졌다면) 그 삭제는
+   * 조용히 아무 일도 하지 않는다. 실행 인스턴스 논스·소유자 필드 같은 별도 신원 개념이
+   * 필요 없다 — 새 세대를 쓴 쪽이 곧 현재 주인이다.
+   */
+  gen: string;
 }
+
+const newGen = (): string =>
+  crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+
+/**
+ * 지금 이 실행이 **쥐고 있는** 슬롯. 무장했거나(내가 쓴 세대) 부팅에서 읽었을 때(그때 저장돼
+ * 있던 세대) 잡힌다. 삭제는 전부 이 캡처를 기준으로 한다.
+ */
+let held: { id: string; gen: string } | null = null;
 
 /** 생존 신호 한 건. 같은 이유로 `id` 를 값에 함께 둔다. */
 interface Beat {
@@ -451,37 +459,59 @@ async function wrapTx<T>(
 }
 
 /**
- * 키 레코드에 대한 **소유권 확인 후 쓰기** — 읽기·판정·쓰기가 한 트랜잭션 안에 있다.
- * 나누면 그 사이에 다른 인스턴스가 끼어들 수 있고, 그게 정확히 이 함수가 막는 것이다.
+ * 슬롯을 **잡는다** — 지금 저장돼 있는 세대를 캡처한다. 쓰기는 없다.
  *
- * 남이 소유한 슬롯에는 **쓰지도 지우지도 않는다**(false 반환). 탭 복제로 소유권을 빼앗긴
- * 인스턴스는 여기서 걸러져 봉인을 갱신하지 못하고, 다음 부팅에 잠금 화면으로 떨어진다 —
- * 두 인스턴스가 같은 슬롯을 번갈아 흔들어 **둘 다** 못 열게 되는 것보다 낫다.
+ * 부팅에서 봉인을 읽을 때와 만료 봉인을 치울 때 쓴다. 이후의 삭제는 전부 이 캡처를 기준으로
+ * 하므로, 그 사이 누가 다시 무장했다면 내 삭제는 아무 일도 하지 않는다.
  */
-async function writeOwnedSlot(id: string, next: WrapSlot | null): Promise<boolean> {
+async function claim(id: string): Promise<WrapSlot | null> {
+  const r = await wrapTx<WrapSlot>(WRAP_STORE, "readonly", (s) => s.get(id));
+  const slot = r.ok ? r.value ?? null : null;
+  if (slot?.gen) held = { id, gen: slot.gen };
+  return slot;
+}
+
+/**
+ * 내가 쥔 세대의 슬롯을 놓는다 — **(id, gen) 이 맞을 때만** 지운다. 판정과 삭제는 두 스토어를
+ * 함께 여는 **하나의 readwrite 트랜잭션** 안에 있다.
+ *
+ * 돌려주는 값 = "이제 이 탭의 슬롯은 없다". 레코드가 애초에 없었거나 내 세대를 지웠으면 true,
+ * **다른 세대가 자리를 차지하고 있으면 false** 다(그건 내 것이 아니므로 손대지 않는다).
+ * 호출부는 이 값이 true 일 때만 탭 식별자까지 버린다.
+ */
+async function releaseSlot(): Promise<boolean> {
+  const mine = held;
+  const id = mine?.id ?? tabId();
+  if (!id) return true; // 슬롯을 가진 적이 없다
   const db = await openDb();
   if (!db) return false;
   try {
-    return await new Promise<boolean>((resolve) => {
-      let owned = false;
+    const gone = await new Promise<boolean>((resolve) => {
+      let ok = false;
       try {
-        const tx = db.transaction(WRAP_STORE, "readwrite");
-        const store = tx.objectStore(WRAP_STORE);
-        const read = store.get(id);
+        const tx = db.transaction([WRAP_STORE, BEAT_STORE], "readwrite");
+        const wrap = tx.objectStore(WRAP_STORE);
+        const read = wrap.get(id);
         read.onsuccess = () => {
           const current = read.result as WrapSlot | undefined;
-          if (current && current.owner !== INSTANCE) return; // 남의 슬롯 — 손대지 않는다
-          owned = true;
-          if (next) store.put(next, id);
-          else if (current) store.delete(id);
+          if (!current) {
+            ok = true; // 이미 없다
+            return;
+          }
+          if (current.gen !== mine?.gen) return; // 그 사이 다시 무장됐다 — 내 것이 아니다
+          ok = true;
+          wrap.delete(id);
+          tx.objectStore(BEAT_STORE).delete(id);
         };
-        tx.oncomplete = () => resolve(owned);
+        tx.oncomplete = () => resolve(ok);
         tx.onerror = () => resolve(false);
         tx.onabort = () => resolve(false);
       } catch {
         resolve(false);
       }
     });
+    if (gone && held?.id === id) held = null;
+    return gone;
   } catch {
     return false;
   } finally {
@@ -489,44 +519,7 @@ async function writeOwnedSlot(id: string, next: WrapSlot | null): Promise<boolea
   }
 }
 
-/**
- * 부팅 소유권 주장(CAS) — 슬롯의 키는 그대로 두고 `owner` 만 이 인스턴스로 바꾼다.
- *
- * **마지막에 부팅한 인스턴스가 소유한다.** 탭을 복제하면 sessionStorage(=탭 식별자와 봉인)가
- * 복사돼 두 탭이 같은 슬롯을 가리키는데, 복제 탭은 그 봉인을 정당하게 열 수 있다(같은 탭의
- * 복사본이다). 다만 슬롯을 **흔들 권리**는 하나여야 하므로 여기서 넘겨받는다.
- */
-async function claimSlot(id: string): Promise<CryptoKey | null> {
-  const db = await openDb();
-  if (!db) return null;
-  try {
-    return await new Promise<CryptoKey | null>((resolve) => {
-      let key: CryptoKey | null = null;
-      try {
-        const tx = db.transaction(WRAP_STORE, "readwrite");
-        const store = tx.objectStore(WRAP_STORE);
-        const read = store.get(id);
-        read.onsuccess = () => {
-          const current = read.result as WrapSlot | undefined;
-          if (!current?.key) return;
-          key = current.key;
-          if (current.owner !== INSTANCE) store.put({ ...current, owner: INSTANCE }, id);
-        };
-        tx.oncomplete = () => resolve(key);
-        tx.onerror = () => resolve(null);
-        tx.onabort = () => resolve(null);
-      } catch {
-        resolve(null);
-      }
-    });
-  } catch {
-    return null;
-  } finally {
-    db.close();
-  }
-}
-
-/** **이 탭의** 랩 키. 다른 탭의 슬롯은 읽지 않는다 (소유권은 건드리지 않는 순수 읽기). */
+/** **이 탭의** 랩 키. 다른 탭의 슬롯은 읽지 않는다 (세대는 건드리지 않는 순수 읽기). */
 export async function getWrapKey(): Promise<CryptoKey | null> {
   const id = tabId();
   if (!id) return null;
@@ -535,16 +528,11 @@ export async function getWrapKey(): Promise<CryptoKey | null> {
 }
 
 /**
- * 폐기 — **이 탭이 소유한 슬롯만** 지운다. 다른 탭(또는 소유권을 가져간 복제 탭)이 열어 둔
- * 금고를 로그아웃 한 번으로 못 열게 만들지 않기 위해서다. 실패해도 던지지 않는다
- * (호출부의 나머지 폐기가 멈추면 더 나쁘다).
+ * 폐기 — 내가 쥔 세대의 슬롯만 지운다. 실패해도 던지지 않는다 (호출부의 나머지 폐기가 멈추면
+ * 더 나쁘고, 못 지운 슬롯은 **열 것이 없는 손잡이**라 다음 스윕에 맡기면 된다).
  */
 export async function deleteWrapKey(): Promise<void> {
-  const id = tabId();
-  if (!id) return;
-  // 생존 신호도 **내 슬롯을 실제로 지웠을 때만** 치운다. 소유권이 남에게 있는데(복제 탭)
-  // 신호만 지우면, 그 탭의 슬롯이 신호 없는 상태로 남아 다른 탭의 청소에 쓸려 나간다.
-  if (await writeOwnedSlot(id, null)) await wrapTx(BEAT_STORE, "readwrite", (s) => s.delete(id));
+  await releaseSlot();
 }
 
 /**
@@ -563,40 +551,52 @@ async function beat(now: number): Promise<void> {
 }
 
 /**
- * 죽은 탭이 남긴 슬롯 청소 — **두 스토어를 함께** 본다.
+ * 오래 조용한 슬롯 청소 — **위생이지 보안 경계가 아니다** (SLOT_TTL_MS 주석 참조).
+ * 짝이 되는 암호문은 이미 없으므로, 여기서 못 지워도 열리는 것은 없다.
  *
- * 다른 탭의 봉인 암호문은 그 탭의 sessionStorage 에 있어 우리가 볼 수 없다. 그래서 "짝이 없는
- * 슬롯" 을 직접 판정하지 못하고 **나이로** 본다 (STALE_SLOT_MS 주석 참조). 자기 슬롯은 여기서
- * 건드리지 않는다 — 그건 dropResume 이 정확히 안다.
+ * 판정과 삭제는 두 스토어를 함께 여는 **하나의 readwrite 트랜잭션** 안에서 한다. 그 안에서
+ * 생존 신호를 **다시 읽고**(그 사이 되살아난 탭을 지우지 않기 위해) 세대를 **다시 대조한다**
+ * (그 사이 다시 무장한 슬롯을 지우지 않기 위해). 자기 슬롯을 따로 골라낼 필요는 없다 —
+ * 살아 있는 탭의 신호는 유휴 한도(15분)보다 젊고 TTL 은 24시간이라 애초에 후보가 아니다.
  */
 export async function sweepStaleWrapSlots(now = Date.now()): Promise<void> {
-  const mine = tabId();
-  const slots = await wrapTx<WrapSlot[]>(WRAP_STORE, "readonly", (s) => s.getAll());
-  const beats = await wrapTx<Beat[]>(BEAT_STORE, "readonly", (s) => s.getAll());
-  if (!slots.ok || !beats.ok) return;
-
-  const seen = new Map((beats.value ?? []).filter((b) => b?.id).map((b) => [b.id, b.at]));
-  const live = new Set<string>();
-  for (const slot of slots.value ?? []) {
-    const id = slot?.id;
-    if (!id) continue;
-    if (id === mine) {
-      live.add(id);
-      continue;
-    }
-    const at = seen.get(id);
-    if (typeof at === "number" && now - at <= STALE_SLOT_MS) {
-      live.add(id);
-      continue;
-    }
-    // 죽은 탭 — 슬롯과 생존 신호를 함께 치운다. (소유권 확인 없이 지운다: 소유자가 이미 없다.)
-    await wrapTx(WRAP_STORE, "readwrite", (s) => s.delete(id));
-    await wrapTx(BEAT_STORE, "readwrite", (s) => s.delete(id));
-  }
-  // 슬롯 없이 남은 생존 신호도 정리한다 (지킬 것이 없는 표식이다).
-  for (const [id, at] of seen) {
-    if (id === mine || live.has(id)) continue;
-    if (now - at > STALE_SLOT_MS) await wrapTx(BEAT_STORE, "readwrite", (s) => s.delete(id));
+  const db = await openDb();
+  if (!db) return;
+  try {
+    await new Promise<void>((resolve) => {
+      try {
+        const tx = db.transaction([WRAP_STORE, BEAT_STORE], "readwrite");
+        const wrap = tx.objectStore(WRAP_STORE);
+        const beats = tx.objectStore(BEAT_STORE);
+        const all = wrap.getAll();
+        all.onsuccess = () => {
+          for (const slot of (all.result as WrapSlot[]) ?? []) {
+            if (!slot?.id) continue;
+            const { id, gen } = slot;
+            const seen = beats.get(id);
+            seen.onsuccess = () => {
+              const at = (seen.result as Beat | undefined)?.at;
+              if (typeof at === "number" && now - at <= SLOT_TTL_MS) return; // 아직 살아 있다
+              const again = wrap.get(id);
+              again.onsuccess = () => {
+                if ((again.result as WrapSlot | undefined)?.gen !== gen) return; // 다시 무장됐다
+                wrap.delete(id);
+                beats.delete(id);
+              };
+            };
+          }
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+        tx.onabort = () => resolve();
+      } catch {
+        resolve();
+      }
+    });
+  } catch {
+    /* 청소 실패는 위생 문제일 뿐이다 — 앱 흐름을 세우지 않는다 */
+  } finally {
+    db.close();
   }
 }
 
@@ -640,13 +640,19 @@ export async function armResume(
   } catch {
     return null;
   }
-  // 생존 신호가 **먼저**다 — 신호 없는 슬롯은 청소 대상이라, 순서를 뒤집으면 갓 무장한 슬롯이
-  // 다른 탭의 청소에 쓸려 나갈 수 있다.
+  // 생존 신호가 **먼저**다 — 신호 없는 슬롯은 청소 후보라, 순서를 뒤집으면 갓 무장한 슬롯이
+  // 다른 탭의 청소에 걸릴 수 있다.
   const now = Date.now();
   touchedAt = now; // 방금 새 신호를 썼다 — 뒤이은 활동이 곧바로 다시 두드리지 않게.
   await wrapTx(BEAT_STORE, "readwrite", (s) => s.put({ id, at: now } satisfies Beat, id));
-  // 소유권을 잃었다면(탭 복제) 여기서 걸러진다 — 봉인을 만들지 않고 물러난다.
-  if (!(await writeOwnedSlot(id, { id, key, owner: INSTANCE }))) return null;
+
+  // 무장 = 이 탭이 **새 세대로** 슬롯을 갖는다. 마지막에 쓴 쪽이 현재 주인이고, 그 이전 세대를
+  // 쥐고 있던 실행(탭 복제 등)의 삭제는 이제부터 아무 일도 하지 않는다.
+  const gen = newGen();
+  if (!(await wrapTx(WRAP_STORE, "readwrite", (s) => s.put({ id, key, gen } satisfies WrapSlot, id))).ok) {
+    return null;
+  }
+  held = { id, gen };
 
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   let sealed: ArrayBuffer;
@@ -700,8 +706,8 @@ export async function takeResume(stored: StoredSession): Promise<ResumePayload |
   const seal = stored.resume;
   if (!seal || typeof crypto === "undefined" || !crypto?.subtle) return null;
   const id = tabId();
-  // 부팅 1회 — 읽으면서 소유권을 이 인스턴스로 가져온다 (claimSlot 주석: 탭 복제 대응).
-  const key = id ? await claimSlot(id) : null;
+  // 부팅 1회 — 읽으면서 지금 세대를 잡는다(claim). 이후의 폐기는 그 세대에만 적용된다.
+  const key = id ? (await claim(id))?.key ?? null : null;
   if (!key) return null;
 
   let plain: Uint8Array | null = null;
@@ -750,15 +756,21 @@ export function clearResumeSeal(): void {
  *
  * 부팅의 **고아 청소**도 이 함수다: 탭을 닫으면 sessionStorage 는 사라지지만 IndexedDB 는
  * 남으므로, 암호문 없는 랩 키가 발견되면 그 자리에서 지운다(그 키로는 열 것이 없다).
- * 단 그건 **이 탭의 슬롯**에 한정된다 — 다른 탭이 남긴 슬롯은 나이로만 판정한다
- * (sweepStaleWrapSlots).
+ * 아직 세대를 쥐고 있지 않으면(부팅 청소) **먼저 잡고(claim) 나서** 그 세대로만 지운다 —
+ * 그래야 그 사이 새로 무장된 슬롯을 뒤늦은 청소가 치지 않는다.
  *
- * 탭 식별자는 **슬롯을 지운 뒤에** 버린다. 순서를 뒤집으면 식별자를 잃은 채 삭제를 시도해
- * 정작 지워야 할 슬롯이 살아남는다.
+ * 실패는 조용히 넘긴다. 못 지운 슬롯은 **열 것이 없는 손잡이**이고(암호문이 이미 없다) 다음
+ * 스윕이 치운다. 여기서 예외를 올리면 잠금·로그아웃의 나머지 폐기가 통째로 멈춘다.
+ *
+ * 탭 식별자는 **슬롯이 실제로 정리됐을 때만** 버린다. 남의 세대가 자리를 지키고 있으면
+ * 식별자도 남겨 둔다 — 그 탭이 계속 쓰고 있는 자리다.
  */
 export async function dropResume(): Promise<void> {
   clearResumeSeal();
-  await deleteWrapKey();
+  const id = tabId();
+  // 부팅 청소 — 지울 대상의 세대를 먼저 잡는다.
+  if (id && !held) await claim(id);
+  if (!(await releaseSlot())) return;
   try {
     sessionStorage.removeItem(TAB_KEY);
   } catch {
