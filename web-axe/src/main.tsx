@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
 import { purgeLegacyStorage } from "./lib/api.ts";
+import { clearSession } from "./lib/persist.ts";
 import { takeSsoRoute } from "./lib/sso.ts";
 
 // @axe/ui Consumer Kit — 디자인 결정의 유일한 출처. 이 앱은 소비자다.
@@ -21,9 +22,15 @@ if (route.kind === "forward") {
 } else {
   purgeLegacyStorage();
 
-  // 콜백 hash 는 소비했으니 주소에서 지운다 — 새로고침이 이미 쓴 code 로 재시도하는 것을
-  // 막고, 인증 코드가 주소창·히스토리에 남지 않게 한다.
-  if (route.kind === "native") history.replaceState(null, "", location.pathname + location.search);
+  if (route.kind === "native") {
+    // 콜백 hash 는 소비했으니 주소에서 지운다 — 새로고침이 이미 쓴 code 로 재시도하는 것을
+    // 막고, 인증 코드가 주소창·히스토리에 남지 않게 한다.
+    history.replaceState(null, "", location.pathname + location.search);
+    // 새 SSO 인증이 도착했다 = 사용자가 지금 로그인을 다시 하는 중이다. 이 탭에 남아 있던
+    // 세션은 그것으로 대체된다. 지우지 않으면 부팅이 곧장 잠금 화면으로 가 버려 도착한
+    // 인증 흐름이 화면을 얻지 못한다 (App 의 SSO 흐름은 phase 전이로 단계를 읽는다).
+    clearSession();
+  }
 
   createRoot(document.getElementById("root")!).render(
     <StrictMode>

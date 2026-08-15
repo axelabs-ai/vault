@@ -44,6 +44,7 @@ import {
   grantBaseFields,
   mapKdf,
   masterPasswordUnlockPresent,
+  readTokens,
   tokenGrant,
   type SsoAuthResult,
 } from "./auth.ts";
@@ -239,7 +240,11 @@ export async function exchangeSsoCode(code: string, codeVerifier: string, twoFac
   applyTwoFactor(body, twoFactorCode);
 
   const { json, accessToken } = await tokenGrant(body);
-  return { accessToken, kdf: mapKdf(json), masterPasswordUnlockPresent: masterPasswordUnlockPresent(json) };
+  return {
+    ...readTokens(json, accessToken),
+    kdf: mapKdf(json),
+    masterPasswordUnlockPresent: masterPasswordUnlockPresent(json),
+  };
 }
 
 /**

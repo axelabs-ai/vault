@@ -79,27 +79,33 @@ export function profileEmail(sync: Record<string, unknown>): string {
 }
 
 /**
- * 마스터패스워드로 감싼 유저키가 서버에 있는가.
+ * 마스터패스워드로 감싼 유저키 암호문(`profile.key`).
  *
  * SSO 로 처음 들어온 계정은 서버에 stub 으로만 생성돼(fork 소스 identity.rs `sso_login`
  * → `User::new`) 이 키가 비어 있다. 그 상태로 잠금해제 화면을 띄우면 무엇을 입력해도
  * 실패하므로, 화면을 그리기 전에 갈라내야 한다.
+ *
+ * 이 값은 **암호문 그대로** 탭 세션에 보관해도 되는 값이다 (lib/persist.ts) — 서버가 어차피
+ * 갖고 있고, 푸는 데는 마스터 패스워드가 필요하다.
  */
-export function hasWrappedUserKey(sync: Record<string, unknown>): boolean {
-  return !!pick<string>(asRecord(pick(sync, "profile", "Profile")), "key", "Key");
+export function wrappedUserKey(sync: Record<string, unknown>): string | undefined {
+  return pick<string>(asRecord(pick(sync, "profile", "Profile")), "key", "Key");
 }
 
 /**
- * 마스터패스워드로 유저키를 풀고, 개인키를 거쳐 조직 키까지 얻는다.
+ * 마스터 패스워드로 유저키를 푼다. **네트워크를 타지 않는다** — 암호문·이메일·KDF 파라미터만
+ * 있으면 된다. 그래서 새로고침 복원에서도 서버를 부르기 **전에** 패스워드를 먼저 검증한다.
+ */
+export function decryptUserKey(encUserKey: string, email: string, password: string, kdf: Kdf): Uint8Array {
+  return PureCrypto.decrypt_user_key_with_master_password(encUserKey, password, email, kdf);
+}
+
+/**
+ * 유저키로 개인키를 풀고, 그걸로 조직 키까지 얻는다.
  * 개인키(RSA)는 org 키 decapsulate 에만 쓰이므로 즉시 zeroize 한다.
  */
-export function unlockKeys(sync: Record<string, unknown>, email: string, password: string, kdf: Kdf): VaultKeys {
+export function deriveOrgKeys(sync: Record<string, unknown>, userKey: Uint8Array): Map<string, Uint8Array> {
   const profile = asRecord(pick(sync, "profile", "Profile"));
-  const encUserKey = pick<string>(profile, "key", "Key");
-  if (!encUserKey) throw new Error("sync 응답에 profile.key(마스터키로 감싼 유저키)가 없다");
-
-  const userKey = PureCrypto.decrypt_user_key_with_master_password(encUserKey, password, email, kdf);
-
   const orgKeys = new Map<string, Uint8Array>();
   const encPrivateKey = pick<string>(profile, "privateKey", "PrivateKey");
   const orgs = asArray(pick(profile, "organizations", "Organizations"));
@@ -120,7 +126,7 @@ export function unlockKeys(sync: Record<string, unknown>, email: string, passwor
       privateKey.fill(0);
     }
   }
-  return { userKey, orgKeys };
+  return orgKeys;
 }
 
 /** 잠금·로그아웃에서 부른다. 이후 rawSync 는 복호 불가능한 암호문으로 남는다. */

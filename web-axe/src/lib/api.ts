@@ -42,7 +42,8 @@ export const CLIENT_ID = "web";
  * 원하는 의미다: 새로고침마다 서버에 새 기기가 등록돼 "새 기기 로그인" 메일이 날아가는 것을
  * 막으면서 "탭 닫으면 소멸"을 지킨다.
  *
- * ⚠ 여기에는 비밀을 절대 넣지 않는다. 토큰·키·평문은 전부 메모리 전용이다.
+ * ⚠ 여기에는 비밀을 절대 넣지 않는다. 세션 토큰과 유저키 **암호문**은 lib/persist.ts 가
+ * 같은 sessionStorage 의 자기 키에 따로 두고, 복호 키와 평문은 어디에도 저장하지 않는다.
  */
 const DEVICE_ID_KEY = "axe-vault.device-id";
 
@@ -128,6 +129,21 @@ export class HttpError extends Error {
     this.status = status;
     this.body = body;
   }
+}
+
+/**
+ * 서버가 **세션 자체를 거부**했는가 (토큰 만료·폐기).
+ *
+ * 두 모양뿐이다: 보호된 API 의 401, 그리고 리프레시 grant 가 죽었을 때의
+ * `400 {"error":"invalid_grant"}` (fork 소스 identity.rs `refresh_login` 이 이 계약을 명시한다).
+ * 네트워크 오류·5xx 는 여기 해당하지 않는다 — 세션은 멀쩡한데 길이 막힌 것이므로 저장분을
+ * 버리면 안 된다 (lib/persist.ts `restoreFailurePhase`).
+ */
+export function isAuthRejection(e: unknown): boolean {
+  if (!(e instanceof HttpError)) return false;
+  if (e.status === 401) return true;
+  const body = e.body as Record<string, unknown> | null;
+  return e.status === 400 && pick<string>(body, "error", "Error") === "invalid_grant";
 }
 
 /** vaultwarden 계열은 버전·엔드포인트마다 에러 모양이 달라 알려진 자리를 순서대로 본다. */

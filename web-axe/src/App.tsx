@@ -46,5 +46,5 @@ export default function App({ ssoHandoff }: { ssoHandoff: SsoHandoff | null }) {
     );
   }
 
-  return <LoginScreen onSignIn={session.signIn} />;
+  return <LoginScreen onSignIn={session.signIn} notice={session.notice} />;
 }

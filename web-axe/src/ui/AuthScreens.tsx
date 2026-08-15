@@ -65,14 +65,16 @@ function AuthShell({ heading, lead, children }: { heading: string; lead: string;
           <li>
             <span className="axe-pattern-auth__trust-index">01</span>
             <span>
-              <strong lang="en">Zero persistence</strong> 키·토큰·평문 어느 것도 저장하지 않습니다. 탭을
-              닫으면 사라집니다.
+              <strong lang="en">Keys in memory only</strong> 마스터 패스워드와 복호 키는 메모리에만
+              둡니다. 이 탭에 남는 것은 서버가 이미 가진 것 — 암호문 상태의 유저키와 세션 토큰 —
+              뿐이고, 탭을 닫으면 그것도 사라집니다.
             </span>
           </li>
           <li>
             <span className="axe-pattern-auth__trust-index">02</span>
             <span>
               <strong lang="en">Idle lock</strong> 15분간 조작이 없으면 메모리의 키를 폐기합니다.
+              새로고침도 같은 잠금 상태로 돌아오므로, 마스터 패스워드만 다시 넣으면 이어집니다.
             </span>
           </li>
           <li>
@@ -124,9 +126,11 @@ function AuthShell({ heading, lead, children }: { heading: string; lead: string;
 
 interface LoginScreenProps {
   onSignIn: (email: string, password: string, twoFactorCode?: string) => Promise<void>;
+  /** 저장된 탭 세션이 서버에 거부돼 여기로 되돌아왔다면 그 사유. */
+  notice?: string | null;
 }
 
-export function LoginScreen({ onSignIn }: LoginScreenProps) {
+export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -185,6 +189,12 @@ export function LoginScreen({ onSignIn }: LoginScreenProps) {
       lead="AXE 계정으로 인증하고, 마스터 패스워드로 이 브라우저에서 직접 복호합니다."
     >
       <form className="axe-pattern-auth__form" onSubmit={submit}>
+        {/* 새로고침으로 되살린 세션이 서버에 거부됐을 때만 뜬다 — 왜 잠금 화면이 아니라
+            로그인 화면으로 왔는지 말해 주지 않으면 사용자는 이유를 알 길이 없다. */}
+        {notice && (
+          <StatusBanner tone="error" title="저장된 세션이 만료됐습니다 — 다시 로그인하세요" description={notice} />
+        )}
+
         <button
           className={`axe-btn axe-btn--secondary axe-btn--lg axe-pattern-auth__provider${ssoBusy ? " axe-btn--loading" : ""}`}
           type="button"
@@ -347,7 +357,8 @@ export function LockScreen({ email, onUnlock, onLogout, heading, lead }: LockScr
             />
           </div>
           <p className="axe-form-field__hint">
-            서버를 다시 부르지 않습니다 — 메모리에 남은 암호문을 다시 풀 뿐입니다.
+            마스터 패스워드는 서버로 전송되지 않습니다 — 이 탭에 남은 암호문을 여기서 다시 풀
+            뿐입니다. 새로고침해도 이 화면으로 돌아오니, 마스터 패스워드만 다시 넣으면 됩니다.
           </p>
         </div>
 
@@ -364,7 +375,7 @@ export function LockScreen({ email, onUnlock, onLogout, heading, lead }: LockScr
       </form>
 
       <p className="axe-pattern-auth__privacy">
-        다른 계정으로 들어가려면 <button className="axe-btn axe-btn--ghost axe-btn--sm" type="button" onClick={onLogout}>로그아웃</button> 후 다시 로그인하세요.
+        다른 계정으로 들어가려면 <button className="axe-btn axe-btn--ghost axe-btn--sm" type="button" onClick={onLogout}>로그아웃</button> 후 다시 로그인하세요. 로그아웃은 이 탭에 남은 암호문과 토큰까지 지웁니다.
       </p>
     </AuthShell>
   );

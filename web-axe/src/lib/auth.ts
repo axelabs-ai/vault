@@ -116,12 +116,43 @@ export const PROVIDER_LABELS: Record<number, string> = {
   7: "WebAuthn",
 };
 
-export interface AuthResult {
+/** 토큰 한 쌍. 탭 세션에 보관하는 값이다 (lib/persist.ts). */
+export interface TokenPair {
   accessToken: string;
+  /** 서버가 `offline_access` scope 에 대해 함께 준다. 없으면 null. */
+  refreshToken: string | null;
+}
+
+export interface AuthResult extends TokenPair {
   kdf: Kdf;
   email: string;
   /** 서버가 신형 계약(masterPasswordUnlock)을 줬는지 — 계약 드리프트 관측용. */
   masterPasswordUnlockPresent: boolean;
+}
+
+export const readTokens = (json: Record<string, unknown>, accessToken: string): TokenPair => ({
+  accessToken,
+  refreshToken: pick<string>(json, "refresh_token", "refreshToken") ?? null,
+});
+
+/**
+ * 리프레시 grant — 저장된 액세스 토큰이 만료됐을 때 한 번 되살려 본다.
+ *
+ * 서버 계약(fork 소스 identity.rs:73 `login`): grant_type 이 `refresh_token` 이면 검사하는
+ * 필수 필드는 `refresh_token` 하나다 (device_* · scope 는 요구하지 않는다). client_id 는
+ * 토큰 재발급에 그대로 실려 가므로 password grant 와 같은 값을 보낸다.
+ * 리프레시 토큰이 죽었으면 `400 {"error":"invalid_grant"}` 이고, 그 판정은
+ * api.ts `isAuthRejection` 이 한다 — 그때는 재로그인 말고는 길이 없다.
+ */
+export async function refreshTokens(refreshToken: string): Promise<TokenPair> {
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: CLIENT_ID,
+    refresh_token: refreshToken,
+  });
+  const { json, accessToken } = await tokenGrant(body);
+  // 서버가 새 리프레시 토큰을 주면 갈아 끼우고, 안 주면 쓰던 것을 계속 쓴다.
+  return { accessToken, refreshToken: pick<string>(json, "refresh_token", "refreshToken") ?? refreshToken };
 }
 
 /** SSO 는 이메일을 사용자가 입력하지 않는다 — sync 프로필에서 읽으므로 여기 없다. */
@@ -216,12 +247,12 @@ export async function authenticate(
   body.set("password", authHash);
   applyTwoFactor(body, twoFactorCode);
 
-  // refresh_token 은 의도적으로 버린다 — 보관하려면 어딘가에 두어야 하고 P1 은 영속 저장을
-  // 금지한다. 액세스 토큰은 최초 sync 에만 쓰이고, 잠금 해제는 메모리의 암호문을 다시 풀 뿐
-  // 네트워크를 타지 않으므로 만료가 화면을 막지 않는다.
+  // 토큰 두 개 다 들고 온다. 보관처는 **탭 세션**(sessionStorage)이고, 거기 들어가는 것은
+  // 서버가 어차피 가진 값뿐이다 — 복호 키는 여전히 메모리에만 산다 (lib/persist.ts).
+  // 새로고침 뒤 첫 잠금해제가 이 토큰으로 암호문을 다시 받아 온다.
   const { json, accessToken } = await tokenGrant(body);
   return {
-    accessToken,
+    ...readTokens(json, accessToken),
     kdf: pre.kdf,
     email: mail,
     masterPasswordUnlockPresent: masterPasswordUnlockPresent(json),
