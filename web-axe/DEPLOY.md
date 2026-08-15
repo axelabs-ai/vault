@@ -1,4 +1,4 @@
-# web-axe 배포 (P1 — 2026-08-14 배포 + 루트 컷오버 + SSO 네이티브 재배포 완료)
+# web-axe 배포 (P1 — 2026-08-14 배포 + 루트 컷오버 + SSO 네이티브 / 2026-08-15 `e6c7c58` 재배포 완료)
 
 `B-vault-axe-frontend` P1 산출물의 배포 설계 + 실제 배포 기록.
 
@@ -321,9 +321,19 @@ docker compose -f /opt/axe/vault/docker-compose.yml up -d web-axe   # 서비스�
   "새 파일 추가 → index.html 교체" 순서가 자연스럽게 무중단이다.
 - **전개 검산은 매니페스트 해시로**: `find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum`
   을 로컬/호스트 양쪽에서 떠서 대조한다 (파일 수까지 함께).
-  현재 배포된 값 = `241157e3…`, 104 files (`605f0c1` 전환기 레일 빌드). 이전: `1249fa3`
+  현재 배포된 값 = `5e75b46b…`, 104 files (`e6c7c58` — 저장소 접근 실패 격리 + SSO 대기
+  신뢰 문구 빌드, 2026-08-15). 이전: `605f0c1` 전환기 레일 `241157e3…`/104, `1249fa3`
   SSO 네이티브 `bf130abc…`/104 (아이콘 3개가 늘어 101 → 104), 루트 컷오버 `160a2a05…`/101,
   그 전 `/axe/` 빌드 `1f8fe31c…`.
+- **롤백은 전개 직전 스냅샷으로**: `rsync -a --delete` 는 옛 dist 를 지우므로, 전개 전에
+  호스트에서 `cp -a web-axe-dist web-axe-dist.rollback` 을 떠 둔다. 되돌리기는 그 반대 방향
+  `rsync -a --delete /opt/axe/vault/web-axe-dist.rollback/ /opt/axe/vault/web-axe-dist/`
+  + `docker exec web-axe nginx -s reload` 로 끝난다 (컨테이너 재생성 불요 — bind mount).
+  현재 남아 있는 스냅샷 = `241157e3…`/104 (`605f0c1`).
+- ⚠️ **`$(curl …)` 로 뜬 해시는 로컬 파일과 절대 안 맞는다 (2026-08-15에 한 번 속았다)**:
+  명령 치환이 **후행 개행을 지운다.** `dist/index.html` 은 1904 바이트인데 `$(...)` 로
+  받으면 1903 이 되어 sha256 이 통째로 달라진다 — 배포가 멀쩡한데 실패로 보인다.
+  검증은 반드시 `curl -o <파일>` 로 받아 `shasum` 을 뜰 것 (`diff` 면 더 확실하다).
 - ⚠️ **이미 200 이던 경로를 새 오리진으로 옮기면 Cloudflare 엣지가 옛 응답을 물고 있다**:
   ingress 규칙이 맞아도 공개 URL 이 안 바뀐다. `?cachebust=…` 로 캐시키를 비껴가 오리진을
   먼저 분리 확인하고, `axe cf purge <url>` 로 단일 URL 만 퍼지한다. 상세 = 2절 ④ 의 함정.
@@ -334,12 +344,13 @@ docker compose -f /opt/axe/vault/docker-compose.yml up -d web-axe   # 서비스�
 ### 사전 확인
 
 - [x] `npm run axe-ui:check` 통과 — @axe/ui 0.36.0, 555 selectors, `ff27964ef334`
-- [x] `npm test` 39/39 통과 (라이브 `prelogin` 왕복 + 클라이언트 버전 핀 + SSO 심 경계
-      + 네이티브 SSO PKCE/교환/2FA)
+- [x] `npm test` 70/70 통과 (라이브 `prelogin` 왕복 + 클라이언트 버전 핀 + SSO 심 경계
+      + 네이티브 SSO PKCE/교환/2FA + 저장소 접근 실패 격리 + SSO 대기 시한/키 신선도)
 - [x] `dist/index.html` 에 인라인 `<script>` 0 개
 - [x] 루트 `/` 200 + `<title>AXE Vault</title>` + 자산이 `/assets/…`
 - [x] **루트가 새 빌드** — 공개 `index.html` + 참조 자산 2개가 로컬 `dist/` 와 sha256 완전 일치
-      (`605f0c1`: `index-Df7Tei33.js` · `index-DXZzmPRn.css`)
+      (`e6c7c58`: `index-_5oc0kL0.js` · `index-DXZzmPRn.css`. `/` 와 `/index.html` 둘 다
+      `6fa03107…` = 로컬, 1904 바이트 byte-exact)
 - [x] **브랜드 아이콘** — `/favicon.svg`·`/apple-touch-icon.png` 이 `~/AXE/favicon-build/`
       마스터와 sha256 일치. `/favicon.ico` 는 오리진 일치, 공개 URL 은 엣지 캐시 만료 대기(2절 ④)
 - [x] CSP 등 보안 헤더 7종이 **세 경로 모두**(`/`·`/index.html`·`/assets/<파일>`)에서 실측
@@ -352,6 +363,10 @@ docker compose -f /opt/axe/vault/docker-compose.yml up -d web-axe   # 서비스�
 - [x] **재배포(`1249fa3`) 전/후에도 계약 무변화** — `/api/config` `/css/vaultwarden.css`
       `/sso-connector.html` `/vw_static/*` 의 상태코드 + 본문 sha256 동일, POST `prelogin` 동일,
       `/alive` 200(타임스탬프라 값만 다름), 루트 해시 파일 `styles.*.css`·`app/vendor.*.js` 200
+- [x] **재배포(`e6c7c58`, 2026-08-15) 전/후에도 계약 무변화** — `/api/config` 본문 sha256
+      `b2e2c620…` 동일, POST `/identity/accounts/prelogin` 본문 sha256 `f079ce3d…` 동일,
+      `/alive` 200. ingress 무변경(경로 동일), vaultwarden·cloudflared 컨테이너 ID·
+      `RestartCount=0`·`StartedAt` 전부 불변, web-axe 도 재생성 없이 `nginx -s reload` 만
 - [x] `vault-classic.axelabs.ai` = 스톡 볼트 (테마 CSS·번들 200, 절대주소로 튕기지 않음)
 - [x] `/axe/` 하위호환 200, `/axe` → 301
 - [x] SSO 심 — 출고된 minified 코드를 그대로 실행해 경계 동작 확인
