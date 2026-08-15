@@ -53,7 +53,11 @@ const DEVICE_ID_KEY = "axe-vault.device-id";
  * 부팅 시 1회 (main.tsx).
  */
 export function purgeLegacyStorage(): void {
-  localStorage.removeItem("axe-vault-poc.device-id");
+  try {
+    localStorage.removeItem("axe-vault-poc.device-id");
+  } catch {
+    /* 저장소 접근이 막힌 환경(프라이빗 모드·정책) — 청소는 최선 노력이고, 부팅을 세우지 않는다 */
+  }
 }
 
 export function deviceIdentifier(): string {

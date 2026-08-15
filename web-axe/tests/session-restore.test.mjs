@@ -444,6 +444,58 @@ test("살아 있는 시도에서는 회전한 토큰이 sync 실패에도 저장
   }
 });
 
+// ------------------------------------------- 저장소 자체가 막힌 환경 (프라이빗 모드 등)
+
+/**
+ * `sessionStorage` 는 있다고 가정할 수 없다 — 프라이빗 모드·용량 초과·기업 정책은 접근 **자체**를
+ * 던진다. 그 실패가 부팅을 죽이거나(로그인 화면조차 못 뜸) 로그아웃의 메모리 폐기를 막으면
+ * (지우려다 예외 → zeroize·화면 전이 통째 중단) 저장소 문제가 보안 문제로 번진다.
+ */
+function withBrokenStorage(run) {
+  const orig = globalThis.sessionStorage;
+  const boom = () => {
+    throw new DOMException("The operation is insecure.", "SecurityError");
+  };
+  globalThis.sessionStorage = { getItem: boom, setItem: boom, removeItem: boom, clear: boom };
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    return run();
+  } finally {
+    globalThis.sessionStorage = orig;
+    console.warn = warn;
+  }
+}
+
+test("저장소 접근이 막혀도 부팅은 로그인 화면으로 정상 진행한다", () => {
+  withBrokenStorage(() => {
+    const boot = persist.restoreSession();
+    assert.equal(boot.phase, "login", "저장소가 막혔다고 부팅이 죽으면 안 된다");
+    assert.equal(boot.session, null);
+    assert.equal(persist.loadSession(), null);
+  });
+});
+
+test("삭제가 실패해도 로그아웃의 키 폐기·화면 전이는 멈추지 않는다", () => {
+  const key = userKey();
+  withBrokenStorage(() => {
+    // clearSession 이 던지면 호출부(logout·forget)의 이후 줄이 통째로 건너뛰어진다.
+    assert.doesNotThrow(() => persist.clearSession());
+    // 그래서 뒤따르는 메모리 폐기가 실제로 실행된다.
+    key.fill(0);
+    assert.ok(zeroed(key));
+    // 복원 실패 판정 경로도 같은 이유로 던지지 않아야 한다.
+    assert.equal(persist.restoreFailurePhase(new api.HttpError(401, "만료", null)), "login");
+  });
+});
+
+test("저장 실패는 여전히 예외다 (채택 원자성이 여기 걸려 있다)", () => {
+  const key = userKey();
+  withBrokenStorage(() => {
+    assert.throws(() => persist.saveSession(FACTS(), TOKENS(), key), /insecure|SecurityError/);
+  });
+});
+
 // ------------------------------------- SSO 대기 구간 (봉인 전 평문 토큰) · 시한
 
 /**

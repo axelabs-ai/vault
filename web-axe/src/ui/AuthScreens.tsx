@@ -34,8 +34,24 @@ function StatusBanner({ tone, title, description }: { tone: "error" | "info"; ti
   );
 }
 
-/** 패턴 크롬. 좌측 서사(context) + 우측 카드(stage) — 두 화면이 공유한다. */
-function AuthShell({ heading, lead, children }: { heading: string; lead: string; children: ReactNode }) {
+/**
+ * 패턴 크롬. 좌측 서사(context) + 우측 카드(stage) — 두 화면이 공유한다.
+ *
+ * `pending` = SSO 인증만 끝나고 아직 아무것도 봉인하지 못한 구간. 공용 신뢰 문구가 그대로 서면
+ * "탭에 남는 것은 암호문뿐" 이라고 **거짓말을 하게 된다** — 그 구간에서는 인증 결과가 평문으로
+ * 메모리에 있고 저장분은 없다. 그래서 01·02 카드를 그 구간의 사실로 갈아 끼운다.
+ */
+function AuthShell({
+  heading,
+  lead,
+  pending,
+  children,
+}: {
+  heading: string;
+  lead: string;
+  pending?: boolean;
+  children: ReactNode;
+}) {
   return (
     <main className="axe-pattern-auth">
       <a className="axe-pattern-skip-link" href="#auth-panel">
@@ -66,16 +82,26 @@ function AuthShell({ heading, lead, children }: { heading: string; lead: string;
             <span className="axe-pattern-auth__trust-index">01</span>
             <span>
               <strong lang="en">Keys in memory only</strong> 마스터 패스워드와 복호 키는 메모리에만
-              둡니다. 이 탭에 남는 것은 암호문뿐입니다 — 유저키는 마스터 패스워드로, 세션 토큰은
-              그 유저키로 감싸여 있어 잠긴 탭에는 쓸 수 있는 것이 없습니다. 탭을 닫으면 그마저
-              사라집니다.
+              둡니다.{" "}
+              {pending
+                ? "지금은 SSO 인증 결과를 이 탭 메모리에만 들고 있고, 저장된 것은 아직 없습니다 — 마스터 패스워드를 넣으면 그때 세션이 봉인돼 저장됩니다."
+                : "이 탭에 남는 것은 암호문뿐입니다 — 유저키는 마스터 패스워드로, 세션 토큰은 그 유저키로 감싸여 있어 잠긴 탭에는 쓸 수 있는 것이 없습니다. 탭을 닫으면 그마저 사라집니다."}
             </span>
           </li>
           <li>
             <span className="axe-pattern-auth__trust-index">02</span>
             <span>
-              <strong lang="en">Idle lock</strong> 15분간 조작이 없으면 메모리의 키를 폐기합니다.
-              새로고침도 같은 잠금 상태로 돌아오므로, 마스터 패스워드만 다시 넣으면 이어집니다.
+              {pending ? (
+                <>
+                  <strong lang="en">Time-boxed</strong> 이 인증 상태는 15분 뒤 만료됩니다. 그때까지
+                  마스터 패스워드를 넣지 않거나 새로고침하면, SSO 부터 다시 시작합니다.
+                </>
+              ) : (
+                <>
+                  <strong lang="en">Idle lock</strong> 15분간 조작이 없으면 메모리의 키를 폐기합니다.
+                  새로고침도 같은 잠금 상태로 돌아오므로, 마스터 패스워드만 다시 넣으면 이어집니다.
+                </>
+              )}
             </span>
           </li>
           <li>
@@ -346,7 +372,11 @@ export function LockScreen({ email, onUnlock, onLogout, heading, lead, pending }
   }
 
   return (
-    <AuthShell heading={heading ?? "금고가 잠겼습니다"} lead={lead ?? `${email} · 마스터 패스워드로 다시 엽니다.`}>
+    <AuthShell
+      heading={heading ?? "금고가 잠겼습니다"}
+      lead={lead ?? `${email} · 마스터 패스워드로 다시 엽니다.`}
+      pending={pending}
+    >
       <form className="axe-pattern-auth__form" onSubmit={submit}>
         <div className="axe-form-field">
           <label className="axe-label axe-form-field__label" htmlFor="unlock-password">

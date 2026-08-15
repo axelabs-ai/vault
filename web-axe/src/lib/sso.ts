@@ -217,16 +217,23 @@ export function ssoFlowStep(flow: SsoFlow, phase: "login" | "locked" | "unlocked
 }
 
 export function clearSsoHandshake(): void {
-  sessionStorage.removeItem(STATE_KEY);
-  sessionStorage.removeItem(VERIFIER_KEY);
+  try {
+    sessionStorage.removeItem(STATE_KEY);
+    sessionStorage.removeItem(VERIFIER_KEY);
+  } catch {
+    /* 저장소 접근이 막힌 환경 — 지우지 못해도 부팅을 세우지 않는다 (lib/persist.ts 와 같은 규칙) */
+  }
 }
 
 /** 부팅 1회. 판정과 동시에 핸드셰이크를 소비(제거)해 재사용·재생을 막는다. */
 export function takeSsoRoute(hash: string): SsoRoute {
-  const route = ssoRoute(hash, {
-    state: sessionStorage.getItem(STATE_KEY),
-    verifier: sessionStorage.getItem(VERIFIER_KEY),
-  });
+  let stored = { state: null as string | null, verifier: null as string | null };
+  try {
+    stored = { state: sessionStorage.getItem(STATE_KEY), verifier: sessionStorage.getItem(VERIFIER_KEY) };
+  } catch {
+    // 읽지 못하면 "이 탭이 시작한 흐름이 아니다" 로 판정된다 — classic 으로 넘어가 거기서 끝난다.
+  }
+  const route = ssoRoute(hash, stored);
   if (route.kind !== "none") clearSsoHandshake();
   return route;
 }

@@ -140,13 +140,36 @@ export function saveSession(facts: SessionFacts, tokens: TokenPair, userKey: Uin
   return clean;
 }
 
+/**
+ * 저장소가 있다고 가정하지 않는다 — 프라이빗 모드·용량 초과·기업 정책은 `sessionStorage` 접근
+ * **자체**를 던진다. 그 실패가 앱 흐름을 막으면 안 된다:
+ *  · 읽기 실패 = "저장분 없음" 으로 취급한다 (부팅은 로그인 화면으로 정상 진행).
+ *  · 삭제 실패 = 흔적이 남을 수 있지만 로그만 남기고 넘어간다 — 로그아웃의 **메모리 키 폐기와
+ *    화면 전이는 반드시 끝나야 하기 때문**이다. 지우지 못한 저장분은 어차피 탭을 닫으면 사라지고,
+ *    봉인돼 있어 마스터 패스워드 없이는 쓸 수 없다.
+ *  · **저장 실패는 그대로 던진다** — 채택 원자성이 그 예외에 걸려 있다 (prepareAdoption).
+ */
+function readRaw(): string | null {
+  try {
+    return sessionStorage.getItem(SESSION_KEY);
+  } catch (e) {
+    console.warn("axe-vault: 세션 저장분을 읽지 못했다 — 저장분 없음으로 취급한다", e);
+    return null;
+  }
+}
+
 export function clearSession(): void {
-  sessionStorage.removeItem(SESSION_KEY);
+  try {
+    sessionStorage.removeItem(SESSION_KEY);
+  } catch (e) {
+    // 여기서 던지면 호출부(logout·forget)의 zeroize·phase 전이가 통째로 멈춘다. 그게 더 나쁘다.
+    console.warn("axe-vault: 세션 저장분을 지우지 못했다 (저장소 접근 실패)", e);
+  }
 }
 
 /** 읽기. 스키마가 안 맞거나 오염됐으면 조용히 되살리지 않고 **버린다**. */
 export function loadSession(): StoredSession | null {
-  const raw = sessionStorage.getItem(SESSION_KEY);
+  const raw = readRaw();
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as StoredSession;
