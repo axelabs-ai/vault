@@ -59,6 +59,17 @@ export const SESSION_KEY = "axe-vault.session";
  */
 export const ACTIVITY_KEY = "axe-vault.activity";
 
+/**
+ * 이 탭의 식별자. 랩 키는 **탭마다 다른 슬롯**에 산다 — 금고를 두 탭으로 열어 두는 것은 흔한
+ * 사용이고, 오리진 전역 슬롯 하나면 한 탭의 로그아웃·재무장·고아 청소가 **다른 탭의 봉인을
+ * 못 열게 만든다**(랩 키가 덮이거나 지워져서). 그 간섭을 슬롯 분리로 끊는다.
+ *
+ * sessionStorage 에 두는 것이 정확한 수명이다 — 새로고침은 살아남고 탭을 닫으면 사라진다.
+ * (api.ts 의 기기 식별자와 수명이 같지만 일부러 따로 만든다: 그쪽은 **서버로 가는 기기 신원**
+ * 이고 이건 로컬 슬롯 이름이다. 한쪽 수명을 바꿨을 때 다른 쪽이 조용히 깨지면 안 된다.)
+ */
+export const TAB_KEY = "axe-vault.tab";
+
 /** 스키마가 바뀌면 올린다 — 낯선 버전은 로드 단계에서 버려진다(부분 복원 금지). */
 export const SESSION_SCHEMA = 3;
 
@@ -68,6 +79,23 @@ export const SESSION_SCHEMA = 3;
  * 방치된 탭이 무한 연장된다). session.ts 가 같은 상수를 재-export 한다.
  */
 export const IDLE_LOCK_MS = 15 * 60 * 1000;
+
+/**
+ * 남의 탭 슬롯을 청소해도 되는 나이.
+ *
+ * 다른 탭의 슬롯은 **지워도 되는지 직접 확인할 방법이 없다** — 그 탭의 sessionStorage(=봉인
+ * 암호문)를 우리는 볼 수 없기 때문이다. 대신 나이로 판정한다: 살아 있는 탭은 활동 때마다
+ * `lastSeen` 을 갱신하고, 유휴 한도를 넘긴 탭은 **스스로 잠기면서 자기 슬롯을 지운다.**
+ * 그러므로 유휴 한도 + 여유를 넘도록 조용한 슬롯은 청소 없이 사라지지 못한 것(탭 강제 종료·
+ * 크래시)이고, 그 슬롯의 짝이 되는 암호문은 이미 세상에 없다.
+ *
+ * 여유(5분)는 `lastSeen` 갱신 간격(TOUCH_INTERVAL_MS)과 시계 오차를 덮는다.
+ */
+export const SLOT_GRACE_MS = 5 * 60 * 1000;
+export const STALE_SLOT_MS = IDLE_LOCK_MS + SLOT_GRACE_MS;
+
+/** `lastSeen` 갱신 최소 간격 — 활동 이벤트마다 IndexedDB 를 두드리지 않기 위해서다. */
+const TOUCH_INTERVAL_MS = 60 * 1000;
 
 /**
  * 잠금 상태에서도 들고 있어도 되는 사실. 전부 서버가 아는 값이고, 이것만으로는 아무것도 못 연다.
@@ -264,6 +292,9 @@ export function markActivity(now = Date.now()): void {
   } catch {
     /* 저장소가 막힌 환경 — 이어가기를 못 할 뿐, 앱은 그대로 돈다 */
   }
+  // 같은 사건에 랩 키 슬롯의 생존 신호를 얹는다 — 이게 없으면 살아 있는 탭의 슬롯을 다른
+  // 탭의 청소가 지운다. (비동기·실패 무시: 생존 신호를 못 보내면 최악이 재-잠금이다.)
+  void touchSlot(now);
 }
 
 /**
@@ -287,11 +318,46 @@ export function idleExpired(now = Date.now()): boolean {
 
 const DB_NAME = "axe-vault";
 const WRAP_STORE = "wrap";
-const WRAP_ID = "session";
 const WRAP_ALG = "AES-GCM";
 const IV_BYTES = 12;
 
 type TxResult<T> = { ok: true; value: T | undefined } | { ok: false };
+
+/**
+ * 한 탭의 랩 키 슬롯.
+ *
+ * `id` 를 값 안에도 두는 것은 중복이지만 의도적이다 — 청소가 `getAll()` **한 번**으로 끝나
+ * (getAllKeys 와 짝을 맞추거나 커서를 돌릴 필요가 없다) 트랜잭션이 항상 요청 하나로 유지된다.
+ */
+interface WrapSlot {
+  id: string;
+  key: CryptoKey;
+  /** 이 탭이 마지막으로 살아 있던 시각. 다른 탭의 청소가 이 값만 보고 판정한다. */
+  lastSeen: number;
+}
+
+/** 이 탭의 식별자 — **만들지 않고** 읽기만 한다 (없으면 이 탭엔 슬롯이 없다는 뜻). */
+function tabId(): string | null {
+  try {
+    return sessionStorage.getItem(TAB_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** 봉인을 만들 때만 부른다 — 슬롯을 실제로 갖게 되는 순간에 식별자가 생긴다. */
+function ensureTabId(): string | null {
+  try {
+    let id = sessionStorage.getItem(TAB_KEY);
+    if (!id) {
+      id = crypto.randomUUID();
+      sessionStorage.setItem(TAB_KEY, id);
+    }
+    return id;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * IndexedDB 는 **있다고 가정하지 않는다** — 프라이빗 모드·기업 정책·구형 환경에서 없거나
@@ -342,18 +408,64 @@ async function wrapTx<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) 
   }
 }
 
-async function putWrapKey(key: CryptoKey): Promise<boolean> {
-  return (await wrapTx("readwrite", (s) => s.put(key, WRAP_ID))).ok;
+async function putSlot(slot: WrapSlot): Promise<boolean> {
+  return (await wrapTx("readwrite", (s) => s.put(slot, slot.id))).ok;
 }
 
-export async function getWrapKey(): Promise<CryptoKey | null> {
-  const r = await wrapTx<CryptoKey>("readonly", (s) => s.get(WRAP_ID));
+async function getSlot(id: string): Promise<WrapSlot | null> {
+  const r = await wrapTx<WrapSlot>("readonly", (s) => s.get(id));
   return r.ok ? r.value ?? null : null;
 }
 
-/** 폐기. 실패해도 던지지 않는다 — 호출부(잠금·로그아웃)의 나머지 폐기가 멈추면 더 나쁘다. */
+/** **이 탭의** 랩 키. 다른 탭의 슬롯은 읽지 않는다. */
+export async function getWrapKey(): Promise<CryptoKey | null> {
+  const id = tabId();
+  return id ? (await getSlot(id))?.key ?? null : null;
+}
+
+/**
+ * 폐기 — **이 탭의 슬롯만** 지운다. 다른 탭이 열어 둔 금고를 로그아웃 한 번으로 못 열게
+ * 만들지 않기 위해서다. 실패해도 던지지 않는다 (호출부의 나머지 폐기가 멈추면 더 나쁘다).
+ */
 export async function deleteWrapKey(): Promise<void> {
-  await wrapTx("readwrite", (s) => s.delete(WRAP_ID));
+  const id = tabId();
+  if (id) await wrapTx("readwrite", (s) => s.delete(id));
+}
+
+/**
+ * 이 탭이 아직 살아 있다고 알린다. **활동 표식과 같은 자리에서만** 불린다(markActivity) —
+ * 새 타이머를 만들지 않는다. 갱신 간격을 두는 이유는 활동 이벤트가 키 입력마다 오기 때문이다.
+ */
+let touchedAt = 0;
+
+async function touchSlot(now: number): Promise<void> {
+  if (now - touchedAt < TOUCH_INTERVAL_MS) return;
+  touchedAt = now;
+  const id = tabId();
+  if (!id) return;
+  const slot = await getSlot(id);
+  // 슬롯이 없으면 만들지 않는다 — 봉인을 건 탭만 슬롯을 갖는다(armResume).
+  if (slot) await putSlot({ ...slot, lastSeen: now });
+}
+
+/**
+ * 죽은 탭이 남긴 슬롯 청소.
+ *
+ * 다른 탭의 봉인 암호문은 그 탭의 sessionStorage 에 있어 우리가 볼 수 없다. 그래서 "짝이 없는
+ * 슬롯" 을 직접 판정하지 못하고 **나이로** 본다 (STALE_SLOT_MS 주석 참조). 자기 슬롯은 여기서
+ * 건드리지 않는다 — 그건 dropResume 이 정확히 안다.
+ */
+export async function sweepStaleWrapSlots(now = Date.now()): Promise<void> {
+  const mine = tabId();
+  const r = await wrapTx<WrapSlot[]>("readonly", (s) => s.getAll());
+  if (!r.ok) return;
+  for (const slot of r.value ?? []) {
+    const id = slot?.id;
+    if (!id || id === mine) continue;
+    if (typeof slot.lastSeen !== "number" || now - slot.lastSeen > STALE_SLOT_MS) {
+      await wrapTx("readwrite", (s) => s.delete(id));
+    }
+  }
 }
 
 // ------------------------------------------------------------------ 재개 봉인
@@ -386,6 +498,8 @@ export async function armResume(
   live: () => boolean = () => true,
 ): Promise<StoredSession | null> {
   if (typeof crypto === "undefined" || !crypto?.subtle) return null;
+  const id = ensureTabId();
+  if (!id) return null;
 
   let key: CryptoKey;
   try {
@@ -394,7 +508,9 @@ export async function armResume(
   } catch {
     return null;
   }
-  if (!(await putWrapKey(key))) return null;
+  const now = Date.now();
+  touchedAt = now; // 방금 새 lastSeen 을 썼다 — 뒤이은 활동이 곧바로 다시 두드리지 않게.
+  if (!(await putSlot({ id, key, lastSeen: now }))) return null;
 
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   let sealed: ArrayBuffer;
@@ -496,10 +612,20 @@ export function clearResumeSeal(): void {
  *
  * 부팅의 **고아 청소**도 이 함수다: 탭을 닫으면 sessionStorage 는 사라지지만 IndexedDB 는
  * 남으므로, 암호문 없는 랩 키가 발견되면 그 자리에서 지운다(그 키로는 열 것이 없다).
+ * 단 그건 **이 탭의 슬롯**에 한정된다 — 다른 탭이 남긴 슬롯은 나이로만 판정한다
+ * (sweepStaleWrapSlots).
+ *
+ * 탭 식별자는 **슬롯을 지운 뒤에** 버린다. 순서를 뒤집으면 식별자를 잃은 채 삭제를 시도해
+ * 정작 지워야 할 슬롯이 살아남는다.
  */
 export async function dropResume(): Promise<void> {
   clearResumeSeal();
   await deleteWrapKey();
+  try {
+    sessionStorage.removeItem(TAB_KEY);
+  } catch {
+    /* 저장소 접근 실패 — 다음 봉인이 새 식별자를 받을 뿐이다 */
+  }
 }
 
 export interface Restored {

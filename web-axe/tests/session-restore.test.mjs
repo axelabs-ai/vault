@@ -75,6 +75,7 @@ function makeIndexedDb() {
               put: (v, k) => request(() => void data.set(k, v)),
               get: (k) => request(() => data.get(k)),
               delete: (k) => request(() => void data.delete(k)),
+              getAll: () => request(() => [...data.values()]),
             });
             return tx;
           },
@@ -180,10 +181,11 @@ test("탭 계약 — 저장은 sessionStorage 의 axe-vault 이름공간에만 �
   assert.deepEqual([...store.keys()], ["axe-vault.session"]);
   assert.equal(persist.SESSION_KEY, "axe-vault.session");
 
-  // 재개 봉인이 붙어도 이름공간 밖으로 나가지 않는다 (유휴 시계까지 포함해서).
+  // 재개 봉인이 붙어도 이름공간 밖으로 나가지 않는다 (유휴 시계·탭 식별자까지 포함해서).
   await persist.armResume(s, TOKENS(), key);
-  assert.deepEqual([...store.keys()].sort(), ["axe-vault.activity", "axe-vault.session"]);
+  assert.deepEqual([...store.keys()].sort(), ["axe-vault.activity", "axe-vault.session", "axe-vault.tab"]);
   assert.equal(persist.ACTIVITY_KEY, "axe-vault.activity");
+  assert.equal(persist.TAB_KEY, "axe-vault.tab");
 });
 
 test("src 어디에도 localStorage 쓰기·읽기가 없다 (레거시 제거만 허용)", () => {
@@ -738,6 +740,26 @@ const armed = async (key = userKey(), tokens = TOKENS()) => {
   return { key, stored: next };
 };
 
+/**
+ * 탭 = **자기 sessionStorage 를 가진 실행 단위**. IndexedDB 는 오리진이 공유한다 — 그래서
+ * 랩 키를 슬롯 하나에 두면 한 탭의 로그아웃·재무장이 다른 탭의 봉인을 못 열게 만든다.
+ * 여기서는 sessionStorage 스냅샷을 갈아 끼워 그 구조를 그대로 재현한다.
+ */
+const tabSnapshot = () => new Map(store);
+const newTab = () => store.clear();
+const enterTab = (snap) => {
+  store.clear();
+  for (const [k, v] of snap) store.set(k, v);
+};
+/** 그 탭인 척하고 슬롯을 들여다본다 (탭은 자기 슬롯만 읽을 수 있으므로). */
+const slotOf = async (snap) => {
+  const keep = tabSnapshot();
+  enterTab(snap);
+  const key = await persist.getWrapKey();
+  enterTab(keep);
+  return key;
+};
+
 test("새로고침 — 봉인이 살아 있으면 잠금이 아니라 이어가기로 부팅한다", async () => {
   const key = userKey();
   const s = persist.saveSession(FACTS(), TOKENS(), key);
@@ -772,39 +794,43 @@ test("유휴 15분이 지난 새로고침은 이어가지 않는다 — 봉인�
   // 잠금 폴백은 그대로다 — 마스터 패스워드로 열 수 있어야 한다.
   assert.deepEqual(persist.unsealTokens(persist.loadSession(), key), TOKENS());
   // 그리고 부팅의 고아 청소가 랩 키까지 지운다 (암호문이 없으니 열 것이 없다).
+  const me = tabSnapshot();
   await persist.dropResume();
-  assert.equal(await persist.getWrapKey(), null);
+  assert.equal(await slotOf(me), null);
 });
 
-test("암호문 없는 랩 키는 부팅에서 고아로 지운다 (탭을 닫았다 돌아온 경우)", async () => {
+test("자기 탭의 고아 슬롯은 부팅이 바로 지운다 (봉인만 걷힌 경우)", async () => {
   await armed();
+  const me = tabSnapshot();
   assert.ok(await persist.getWrapKey());
 
-  // 탭 닫기 = 브라우저가 sessionStorage 를 지운다. IndexedDB 는 남는다.
-  store.clear();
-  assert.equal(persist.restoreSession().phase, "login");
+  // 봉인만 사라진 상태 = 이 탭의 랩 키로는 열 것이 없다.
+  persist.clearResumeSeal();
+  assert.equal(persist.restoreSession().phase, "locked");
 
   await persist.dropResume();
-  assert.equal(await persist.getWrapKey(), null, "열 것이 없는 랩 키가 남았다");
+  assert.equal(await slotOf(me), null, "열 것이 없는 랩 키가 남았다");
 });
 
 test("로그아웃 — sessionStorage 도 IndexedDB 도 잔존 0", async () => {
   await armed();
+  const me = tabSnapshot();
   assert.ok(store.size > 0 && (await persist.getWrapKey()));
 
   persist.clearSession();
   await persist.dropResume();
 
-  assert.equal(store.size, 0);
-  assert.equal(await persist.getWrapKey(), null);
+  assert.equal(store.size, 0, "탭에 남은 것이 있다");
+  assert.equal(await slotOf(me), null, "이 탭의 랩 키가 남았다");
   assert.equal(persist.restoreSession().phase, "login");
 });
 
 test("잠금 — 재개 봉인만 폐기하고 잠금 폴백은 남긴다", async () => {
   const { key } = await armed();
+  const me = tabSnapshot();
   await persist.dropResume();
 
-  assert.equal(await persist.getWrapKey(), null);
+  assert.equal(await slotOf(me), null);
   const left = persist.loadSession();
   assert.equal(left.resume, undefined);
   assert.equal(persist.restoreSession().phase, "locked", "잠갔는데 새로고침이 다시 열면 잠금이 아니다");
@@ -921,6 +947,101 @@ test("유휴 시계 — 표식이 없거나 읽을 수 없으면 만료로 본�
 
   store.set("axe-vault.activity", "어제쯤");
   assert.equal(persist.idleExpired(t0), true);
+});
+
+// ------------------------------------------------------- 탭별 슬롯 (탭 간 간섭 차단)
+
+/**
+ * 금고를 여러 탭으로 여는 것은 흔한 사용이다. 랩 키를 오리진 전역 슬롯 하나에 두면
+ * **한 탭의 정상 동작이 다른 탭의 금고를 잠가 버린다** — A 의 로그아웃이 키를 지우고, A 의
+ * 재무장이 키를 덮고, A 의 고아 청소가 B 의 키를 치운다. 화면에는 "새로고침했더니 갑자기
+ * 마스터 패스워드를 묻는다" 로만 보여서, 원인을 찾을 단서가 없다.
+ *
+ * 그래서 슬롯을 탭별로 가른다. 대가는 **다른 탭의 슬롯을 직접 판정할 수 없다**는 것이다 —
+ * 그 탭의 암호문은 그 탭의 sessionStorage 에 있다. 그 자리를 `lastSeen` 나이가 메운다.
+ */
+test("탭 A 의 로그아웃이 탭 B 의 이어가기를 깨뜨리지 않는다", async () => {
+  const a = await armed();
+  const tabA = tabSnapshot();
+
+  // 탭 B — 같은 오리진의 다른 탭 (sessionStorage 는 자기 것, IndexedDB 는 공유).
+  newTab();
+  const b = await armed();
+  const tabB = tabSnapshot();
+  assert.notEqual(tabA.get("axe-vault.tab"), tabB.get("axe-vault.tab"), "두 탭이 같은 슬롯을 쓴다");
+
+  // 탭 A 에서 로그아웃.
+  enterTab(tabA);
+  persist.clearSession();
+  await persist.dropResume();
+  assert.equal(await slotOf(tabA), null, "A 는 자기 슬롯을 지웠어야 한다");
+
+  // 탭 B 는 아무 일도 없었다는 듯 이어간다.
+  enterTab(tabB);
+  assert.equal(persist.restoreSession().phase, "resuming");
+  const payload = await persist.takeResume(b.stored);
+  assert.ok(payload, "A 의 로그아웃이 B 의 봉인을 못 열게 만들었다");
+  assert.deepEqual([...payload.userKey], [...b.key]);
+  assert.notDeepEqual([...b.key], [...a.key], "두 탭이 같은 키를 봉인했다 — 시나리오가 무의미하다");
+});
+
+test("고아 청소는 살아 있는 다른 탭의 슬롯을 지우지 않는다", async () => {
+  newTab();
+  const b = await armed();
+  const tabB = tabSnapshot();
+
+  // 탭 A — 봉인 없는 부팅(로그인 화면). 자기 슬롯 폐기 + 죽은 슬롯 청소를 한다.
+  newTab();
+  assert.equal(persist.restoreSession().phase, "login");
+  await persist.dropResume();
+  await persist.sweepStaleWrapSlots();
+
+  enterTab(tabB);
+  assert.ok(await persist.getWrapKey(), "최근까지 살아 있던 탭의 슬롯을 지웠다");
+  assert.ok(await persist.takeResume(b.stored), "B 가 이어가지 못하게 됐다");
+});
+
+test("유휴 마감 + 여유를 넘도록 조용한 슬롯은 청소된다 (탭이 청소 없이 사라진 경우)", async () => {
+  const t0 = Date.now();
+  newTab();
+  await armed();
+  const dead = tabSnapshot();
+
+  // 그 탭이 강제 종료됐다 = 암호문(sessionStorage)은 사라지고 슬롯만 남는다.
+  newTab();
+  await persist.sweepStaleWrapSlots(t0 + persist.STALE_SLOT_MS - 5000);
+  assert.ok(await slotOf(dead), "아직 마감+여유를 넘지 않았는데 지웠다");
+
+  await persist.sweepStaleWrapSlots(t0 + persist.STALE_SLOT_MS + 5000);
+  assert.equal(await slotOf(dead), null, "죽은 탭의 슬롯이 남았다");
+  assert.equal(persist.STALE_SLOT_MS, persist.IDLE_LOCK_MS + persist.SLOT_GRACE_MS);
+});
+
+test("활동이 슬롯의 생존 신호를 갱신한다 (살아 있는 탭이 청소되지 않는 이유)", async () => {
+  const t0 = Date.now();
+  newTab();
+  await armed();
+  const live = tabSnapshot();
+
+  // 마감선 직전의 활동 — 유휴 잠금은 이걸로 연장되고, 슬롯 나이도 같이 젊어져야 한다.
+  persist.markActivity(t0 + persist.STALE_SLOT_MS - 1000);
+  await new Promise((r) => setTimeout(r, 20)); // 생존 신호는 비동기다
+
+  newTab();
+  await persist.sweepStaleWrapSlots(t0 + persist.STALE_SLOT_MS + 5000);
+  assert.ok(await slotOf(live), "활동을 보고했는데도 살아 있는 탭의 슬롯이 청소됐다");
+});
+
+test("같은 탭의 새로고침은 같은 슬롯을 다시 쓴다", async () => {
+  const { key } = await armed();
+  const id = store.get("axe-vault.tab");
+  assert.ok(id, "봉인을 건 탭은 식별자를 가져야 한다");
+
+  // 새로고침 = 같은 sessionStorage 를 그대로 다시 읽는 것 (탭 식별자 포함).
+  const boot = persist.restoreSession();
+  assert.equal(boot.phase, "resuming");
+  assert.equal(store.get("axe-vault.tab"), id, "새로고침이 탭 식별자를 갈아 치웠다");
+  assert.deepEqual([...(await persist.takeResume(boot.session)).userKey], [...key]);
 });
 
 /**

@@ -45,6 +45,7 @@ import {
   restoreFailurePhase,
   restoreSession,
   saveSession,
+  sweepStaleWrapSlots,
   takeResume,
   unsealTokens,
   type Restored,
@@ -715,14 +716,19 @@ export function useSession(): Session {
   /**
    * 부팅 1회.
    *  · 살아 있는 봉인이 있으면 이어간다.
-   *  · 없으면 **고아 랩 키를 지운다** — 탭을 닫으면 sessionStorage 의 암호문은 사라지지만
-   *    IndexedDB 는 남는다. 열 것이 없는 랩 키를 계속 두지 않는다. (유휴 만료로 봉인이 걷힌
-   *    부팅도 여기로 온다 — restoreSession 이 이미 암호문을 걷어 냈다.)
+   *  · 없으면 **이 탭의 고아 랩 키를 지운다** — 탭을 닫으면 sessionStorage 의 암호문은
+   *    사라지지만 IndexedDB 는 남는다. 열 것이 없는 랩 키를 계속 두지 않는다. (유휴 만료로
+   *    봉인이 걷힌 부팅도 여기로 온다 — restoreSession 이 이미 암호문을 걷어 냈다.)
+   *  · 그리고 **죽은 탭이 남긴 슬롯**을 나이로 청소한다. 다른 탭의 암호문은 볼 수 없으므로
+   *    (그 탭의 sessionStorage 다) 짝 없는 슬롯을 직접 판정할 수 없고, 유휴 한도+여유를
+   *    넘도록 조용한 슬롯만 지운다 — 그만큼 조용한 탭은 이미 스스로 잠기며 자기 슬롯을
+   *    폐기했을 상태다.
    */
   useEffect(() => {
     // 부팅 판정(boot)은 첫 렌더에 고정된 값이라 의존성이 없다.
     if (boot.phase === "resuming") void resume();
     else void dropResume();
+    void sweepStaleWrapSlots();
   }, [boot.phase, resume]);
 
   const reveal = useCallback((item: VaultItem, fields: SecretField[]): RevealedItem => {
