@@ -1,7 +1,7 @@
 {
   "schema": "@axe/ui/consumer-lock@1",
   "uiVersion": "0.36.0",
-  "providerCommit": "d6c213685f077bb7c397fb7bc50b4d2636fdd600",
+  "providerCommit": "4f87e0bd14042978c67f270f70a462d1485e1cda",
   "profile": "core-data",
   "compatibility": "modern",
   "assetBase": "fonts",
@@ -114,7 +114,7 @@
     {
       "path": "VERSION",
       "bytes": 206,
-      "sha256": "5eb477575e78a79a0a69136dbb9323af9e3a9f7719bd3ae76cb65d4f04e3d06f"
+      "sha256": "46dfd168386728e158184078f0c1bb1ba30ce0194947464b0e6818be85cb5cee"
     },
     {
       "path": "axe-ui.css",
