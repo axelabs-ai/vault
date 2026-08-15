@@ -284,6 +284,84 @@ test("저장 페이로드 검사에 걸려도 마찬가지로 키를 지운다",
   assert.equal(stored(), undefined);
 });
 
+// ------------------------------------------------------- 경합 (뒤늦은 완료·토큰 회전)
+
+/**
+ * 잠금해제는 서버 왕복을 포함하므로 그 사이에 로그아웃이 끼어들 수 있다. 세대 대조가 없으면
+ * 뒤늦게 끝난 해제가 **이미 로그아웃한 세션을 되살린다** — 화면도, 저장분도, 메모리 키까지.
+ * 어느 화면에도 안 나타나는 종류라 여기서 못박는다.
+ * (phase 가 login 에 남는 것은 구조로 보장된다: abandonIfStale 이 true 를 주면 useSession.adopt
+ *  이 setState 한 줄도 실행하지 않고 되돌아간다.)
+ */
+test("잠금해제 중 로그아웃하면 뒤늦은 완료가 세션을 되살리지 못한다", () => {
+  const inflightKey = userKey();
+  // 진행 중이던 시도가 그 사이 토큰 회전분을 저장해 둔 상황까지 재현한다.
+  persist.saveSession(FACTS(), TOKENS(), userKey());
+
+  // 로그아웃 = 세대 상승 + 세션 폐기(sessionAlive=false)
+  assert.equal(session.abandonIfStale(1, 2, inflightKey, false), true, "채택하면 안 된다");
+  assert.ok(zeroed(inflightKey), "버려진 시도의 유저키가 살아 있다");
+  assert.equal(stored(), undefined, "로그아웃했는데 저장분이 되살아났다");
+});
+
+test("잠금은 세션을 버리는 게 아니다 — 뒤늦은 완료의 키만 지우고 저장분은 남긴다", () => {
+  const inflightKey = userKey();
+  persist.saveSession(FACTS(), TOKENS(), userKey());
+
+  assert.equal(session.abandonIfStale(1, 2, inflightKey, true), true);
+  assert.ok(zeroed(inflightKey), "버려진 시도의 유저키가 살아 있다");
+  assert.ok(stored(), "잠금이 저장분을 지우면 다음 잠금해제가 재로그인이 된다");
+});
+
+test("세대가 그대로면 정상 채택 경로다 (키를 지우지 않는다)", () => {
+  const key = userKey();
+  assert.equal(session.abandonIfStale(3, 3, key, true), false);
+  assert.ok(!zeroed(key), "정상 경로에서 키를 지우면 안 된다");
+});
+
+/** api.ts 가 쓰는 것만 흉내낸다 (ok·status·text). */
+const res = (status, body) => ({ ok: status < 400, status, text: async () => JSON.stringify(body) });
+
+test("리프레시로 회전한 토큰은 sync 가 실패해도 저장분에 남는다 (다음 시도가 그걸 쓴다)", async () => {
+  const ROTATED_ACCESS = "eyJhbGciOiJSUzI1NiJ9.cm90YXRlZA.c2ln"; // pragma: allowlist secret
+  const ROTATED_REFRESH = "rotated-refresh-9c2b"; // pragma: allowlist secret
+  const facts = FACTS();
+  const key = userKey();
+  persist.saveSession(facts, TOKENS(), key); // 저장분은 아직 구 토큰
+
+  const origFetch = globalThis.fetch;
+  let syncCalls = 0;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("/identity/connect/token")) {
+      return res(200, { access_token: ROTATED_ACCESS, refresh_token: ROTATED_REFRESH, expires_in: 3600 });
+    }
+    syncCalls += 1;
+    // 1) 액세스 토큰 만료 → 2) 회전 후 재시도는 일시 장애
+    return syncCalls === 1 ? res(401, {}) : res(500, { message: "일시 장애" });
+  };
+
+  try {
+    let rotatedSeen = null;
+    await assert.rejects(
+      () => session.pullSync(facts, TOKENS(), key, (s, t) => (rotatedSeen = t)),
+      /일시 장애/,
+      "sync 실패는 그대로 올라와야 한다 (잠금 화면 유지·재시도 가능)",
+    );
+
+    // 핵심: 서버는 회전 시점에 구 리프레시 토큰을 죽인다. 그걸 저장하지 않으면 일시 장애가
+    // 강제 재로그인으로 굳는다.
+    assert.deepEqual(rotatedSeen, { accessToken: ROTATED_ACCESS, refreshToken: ROTATED_REFRESH });
+    assert.deepEqual(persist.unsealTokens(persist.loadSession(), key), {
+      accessToken: ROTATED_ACCESS,
+      refreshToken: ROTATED_REFRESH,
+    });
+    assert.equal(syncCalls, 2, "회전 후 sync 를 정확히 한 번 더 시도해야 한다");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 // -------------------------------------------- 조직 키 유도의 부분 결과 (누수 방지)
 
 /**

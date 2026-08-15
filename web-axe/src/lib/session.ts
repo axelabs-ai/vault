@@ -98,6 +98,52 @@ export function prepareAdoption(
   }
 }
 
+/**
+ * 뒤늦게 끝난 시도를 채택해도 되는가 — **세대(generation) 대조**.
+ *
+ * 잠금해제는 서버 왕복을 포함하므로, 그 사이에 사용자가 로그아웃하거나 잠글 수 있다. 아무 확인
+ * 없이 채택하면 **이미 로그아웃한 세션이 뒤늦게 되살아난다** (화면·저장분·메모리 키까지 전부).
+ * 그래서 시도 시작 시점의 세대를 들고 있다가, 비동기 경계를 넘은 뒤 어긋났으면 결과를 버린다.
+ *
+ * 버릴 때 두 가지를 한다: 유도한 유저키를 zeroize 하고, **세션이 이미 버려진 상태(로그아웃)면
+ * 저장분도 다시 지운다** — 진행 중이던 시도가 그 사이 토큰 회전분을 저장해 뒀을 수 있어서다.
+ * 잠금은 세션을 버리는 게 아니므로 저장분은 그대로 둔다.
+ *
+ * 훅 밖의 함수다 (tests/session-restore.test.mjs 가 세 경우를 전부 고정한다).
+ */
+export function abandonIfStale(gen: number, current: number, userKey: Uint8Array, sessionAlive: boolean): boolean {
+  if (gen === current) return false;
+  userKey.fill(0);
+  if (!sessionAlive) clearSession();
+  return true;
+}
+
+/**
+ * 저장된 세션으로 암호문을 다시 받아 온다. 액세스 토큰이 만료(401)됐으면 리프레시 토큰으로
+ * 한 번 되살린다.
+ *
+ * ⚠ 회전에 성공하면 **sync 성공을 기다리지 않고 곧바로 재봉인해 저장한다.** 서버는 회전 시점에
+ * 구 리프레시 토큰을 무효화하므로(fork 소스 auth.rs `refresh_tokens` → 새 device token),
+ * 회전분을 들고만 있다가 sync 가 실패해 버리면 **일시적인 장애가 강제 재로그인으로 굳는다** —
+ * 다음 시도가 이미 죽은 토큰을 다시 꺼내 쓰기 때문이다. 저장이 먼저, 그다음이 sync 다.
+ * `onRotate` 는 호출부의 메모리 사본을 같은 순간에 맞춰 준다 (sync 가 실패해도 갱신은 남는다).
+ */
+export async function pullSync(
+  facts: SessionFacts,
+  tokens: TokenPair,
+  userKey: Uint8Array,
+  onRotate: (stored: StoredSession, tokens: TokenPair) => void,
+): Promise<{ raw: Record<string, unknown>; tokens: TokenPair }> {
+  try {
+    return { raw: await fetchSync(tokens.accessToken), tokens };
+  } catch (e) {
+    if (!tokens.refreshToken || !(e instanceof HttpError) || e.status !== 401) throw e;
+    const rotated = await refreshTokens(tokens.refreshToken);
+    onRotate(saveSession(facts, rotated, userKey), rotated);
+    return { raw: await fetchSync(rotated.accessToken), tokens: rotated };
+  }
+}
+
 export interface Session {
   phase: Phase;
   email: string;
@@ -137,6 +183,11 @@ export function useSession(): Session {
   const tokensRef = useRef<TokenPair | null>(null);
   /** sessionStorage 에 있는 것의 메모리 사본. */
   const storedRef = useRef<StoredSession | null>(boot.session);
+  /**
+   * 세션 세대. 로그아웃·잠금이 올린다 — 진행 중이던 잠금해제가 뒤늦게 끝나 이미 끝난 세션을
+   * 되살리는 것을 막는 유일한 장치다 (abandonIfStale).
+   */
+  const genRef = useRef(0);
 
   const dropKeys = useCallback(() => {
     wipeKeys(keysRef.current);
@@ -144,6 +195,8 @@ export function useSession(): Session {
   }, []);
 
   const lock = useCallback(() => {
+    // 진행 중이던 잠금해제가 있다면 그 결과는 이제 무효다 (잠그라는 지시가 더 최근이다).
+    genRef.current++;
     dropKeys();
     // 봉인된 저장분이 있을 때만 평문 토큰을 버린다 — 다음 잠금해제가 유저키로 되찾을 수 있는
     // 경우에 한해서다. (저장분이 없는 SSO 대기 상태는 unlocked 를 지난 적이 없어 여기 오지 않지만,
@@ -154,6 +207,8 @@ export function useSession(): Session {
   }, [dropKeys]);
 
   const logout = useCallback(() => {
+    // 진행 중이던 잠금해제가 뒤늦게 끝나도 이 로그아웃을 뒤집지 못한다.
+    genRef.current++;
     clearSession();
     dropKeys();
     rawSyncRef.current = null;
@@ -168,6 +223,7 @@ export function useSession(): Session {
 
   /** 저장분을 되살릴 수 없다 — 지우고 사유와 함께 로그인 화면으로. */
   const forget = useCallback((reason: string) => {
+    genRef.current++;
     clearSession();
     rawSyncRef.current = null;
     factsRef.current = null;
@@ -178,9 +234,14 @@ export function useSession(): Session {
     setPhase("login");
   }, []);
 
-  /** 채택 — 저장까지 끝난 재료만 설치한다. 실패는 prepareAdoption 안에서 원자적으로 되돌아간다. */
+  /**
+   * 채택 — 저장까지 끝난 재료만 설치한다. 실패는 prepareAdoption 안에서 원자적으로 되돌아간다.
+   * 설치 **직전**에 세대를 대조한다: 그 사이 로그아웃·잠금이 있었으면 아무것도 설치하지 않고
+   * 유도한 키를 지운 채 조용히 끝낸다 (돌아온 값 false = 채택 안 함).
+   */
   const adopt = useCallback(
-    (raw: Record<string, unknown>, facts: SessionFacts, tokens: TokenPair, userKey: Uint8Array) => {
+    (gen: number, raw: Record<string, unknown>, facts: SessionFacts, tokens: TokenPair, userKey: Uint8Array) => {
+      if (abandonIfStale(gen, genRef.current, userKey, !!factsRef.current)) return false;
       const { keys, data, stored } = prepareAdoption(raw, facts, tokens, userKey);
       dropKeys();
       keysRef.current = keys;
@@ -192,12 +253,14 @@ export function useSession(): Session {
       setVault(data);
       setNotice(null);
       setPhase("unlocked");
+      return true;
     },
     [dropKeys],
   );
 
   const signIn = useCallback(
     async (emailInput: string, password: string, twoFactorCode?: string) => {
+      const gen = genRef.current;
       const pre = await prelogin(emailInput);
       const auth = await authenticate(emailInput, password, pre, twoFactorCode);
       const raw = await fetchSync(auth.accessToken);
@@ -208,6 +271,7 @@ export function useSession(): Session {
       // 체감 지연이 문제가 되면 worker 로 옮긴다.
       const userKey = decryptUserKey(encUserKey, auth.email, password, pre.kdf);
       adopt(
+        gen,
         raw,
         { email: auth.email, kdf: pre.kdf, encUserKey },
         { accessToken: auth.accessToken, refreshToken: auth.refreshToken },
@@ -242,20 +306,6 @@ export function useSession(): Session {
   );
 
   /**
-   * 새로고침으로 되살아난 세션의 암호문 다시 받기. 액세스 토큰이 만료(401)됐으면 리프레시
-   * 토큰으로 한 번 되살려 보고, 회전된 토큰을 함께 돌려준다 (채택 단계가 다시 봉인해 저장한다).
-   */
-  const pullSync = useCallback(async (tokens: TokenPair) => {
-    try {
-      return { raw: await fetchSync(tokens.accessToken), tokens };
-    } catch (e) {
-      if (!tokens.refreshToken || !(e instanceof HttpError) || e.status !== 401) throw e;
-      const rotated = await refreshTokens(tokens.refreshToken);
-      return { raw: await fetchSync(rotated.accessToken), tokens: rotated };
-    }
-  }, []);
-
-  /**
    * 잠금 해제. 갈래는 둘이지만 사람에게는 한 화면이다:
    *  · 이 탭이 암호문을 아직 들고 있으면(유휴·수동 잠금) 메모리에서 바로 푼다 — 네트워크 없음.
    *  · 새로고침으로 되살아난 세션이면 봉인을 풀어 얻은 토큰으로 암호문을 다시 받아 온다.
@@ -264,6 +314,8 @@ export function useSession(): Session {
    */
   const unlock = useCallback(
     async (password: string) => {
+      // 이 시도의 세대. 서버 왕복 동안 로그아웃·잠금이 끼어들면 결과를 통째로 버린다.
+      const gen = genRef.current;
       const facts = factsRef.current;
       if (!facts) throw new Error(NO_SESSION);
 
@@ -298,10 +350,15 @@ export function useSession(): Session {
       let raw = rawSyncRef.current;
       if (!raw) {
         try {
-          const pulled = await pullSync(tokens);
+          // 토큰이 회전되면 그 즉시 저장분과 메모리 사본이 함께 갱신된다 (pullSync 주석 참조).
+          const pulled = await pullSync(facts, tokens, userKey, (stored) => {
+            storedRef.current = stored;
+          });
           raw = pulled.raw;
           tokens = pulled.tokens;
         } catch (e) {
+          // 취소된 시도의 실패는 화면에 띄우지 않는다 — 이미 다른 화면에 있다.
+          if (abandonIfStale(gen, genRef.current, userKey, !!factsRef.current)) return;
           userKey.fill(0);
           // 서버가 세션을 거부했으면 저장분은 쓸모없다 — 지우고 사유와 함께 로그인 화면으로.
           // 네트워크 실패면 잠금 화면에 남아 다시 시도하게 한다 (persist.ts 참조).
@@ -310,9 +367,9 @@ export function useSession(): Session {
         }
       }
 
-      adopt(raw, facts, tokens, userKey);
+      adopt(gen, raw, facts, tokens, userKey);
     },
-    [adopt, forget, pullSync],
+    [adopt, forget],
   );
 
   const reveal = useCallback((item: VaultItem, fields: SecretField[]): RevealedItem => {
