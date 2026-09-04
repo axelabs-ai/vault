@@ -308,3 +308,37 @@ test("access_token 이 없는 응답은 조용히 통과하지 않는다", async
     globalThis.fetch = originalFetch;
   }
 });
+
+// ------------------------------------------------------ 자동 SSO 청구 (루프 차단)
+
+test("자동 SSO 는 탭당 한 번만 청구된다", () => {
+  store.clear();
+  assert.equal(sso.claimAutoSso(), true, "첫 진입은 자동으로 시작할 수 있어야 한다");
+  assert.equal(sso.claimAutoSso(), false, "두 번째부터는 거절 — 이게 리다이렉트 루프를 끊는다");
+  assert.equal(sso.claimAutoSso(), false);
+});
+
+test("핸드셰이크 소비는 자동 표식을 지우지 않는다", () => {
+  // 지운다면 콜백이 돌아올 때마다 자동 SSO 가 되살아나 루프가 그대로 산다.
+  store.clear();
+  assert.equal(sso.claimAutoSso(), true);
+  sso.clearSsoHandshake();
+  assert.equal(sso.claimAutoSso(), false);
+});
+
+test("표식을 남기지 못하는 저장소에서는 자동 시작하지 않는다", () => {
+  const real = globalThis.sessionStorage;
+  globalThis.sessionStorage = {
+    getItem: () => null,
+    setItem: () => {
+      throw new Error("저장소 접근 거부");
+    },
+    removeItem: () => {},
+  };
+  try {
+    // 루프를 감지할 표식이 없다 = 멈출 수단 없이 도는 쪽이 된다 → 사용자가 버튼으로 시작한다.
+    assert.equal(sso.claimAutoSso(), false);
+  } finally {
+    globalThis.sessionStorage = real;
+  }
+});

@@ -230,6 +230,34 @@ export function clearSsoHandshake(): void {
   }
 }
 
+/**
+ * **자동 SSO 는 탭당 한 번.** 로그인 화면이 뜨자마자 SSO 를 스스로 시작하면, 실패하는
+ * 왕복은 그대로 무한 루프가 된다 — 화면이 뜬다 → 나간다 → 돌아온다 → 다시 뜬다. 그래서
+ * 시도 자체를 **청구(claim)** 로 만든다: 표식을 남길 수 있었던 첫 호출만 true 를 받는다.
+ *
+ * 표식이 sessionStorage 인 이유는 그 수명이 정확히 "이 탭" 이어서다 — 리다이렉트 왕복과
+ * 새로고침을 넘겨 살고(그래서 루프를 실제로 끊고), 탭을 닫으면 사라진다(그래서 다음 방문은
+ * 다시 한 번 자동으로 시도한다). 핸드셰이크(state·verifier)와 달리 `clearSsoHandshake` 가
+ * 이 표식을 지우지 않는 것도 같은 이유다 — 콜백마다 지웠다면 루프가 그대로 되살아난다.
+ *
+ * 두 번째 효과: SSO 로 들어와 로그아웃한 사용자를 자동 SSO 가 **곧바로 다시 끌고 들어가지
+ * 않는다**. 표식이 남아 있어 재마운트는 청구에 실패한다.
+ *
+ * 저장소가 막힌 환경에서는 false 다. 표식을 남기지 못한다 = 루프를 감지할 방법이 없다 —
+ * 그런 곳에서 자동 시작을 하면 멈출 수단 없이 도는 쪽이 된다. 사용자는 버튼으로 시작한다.
+ */
+const AUTO_KEY = "axe-vault.sso-auto";
+
+export function claimAutoSso(): boolean {
+  try {
+    if (sessionStorage.getItem(AUTO_KEY)) return false;
+    sessionStorage.setItem(AUTO_KEY, "1");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** 부팅 1회. 판정과 동시에 핸드셰이크를 소비(제거)해 재사용·재생을 막는다. */
 export function takeSsoRoute(hash: string): SsoRoute {
   let stored = { state: null as string | null, verifier: null as string | null };

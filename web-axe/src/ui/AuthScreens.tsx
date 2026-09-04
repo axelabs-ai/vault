@@ -6,11 +6,11 @@
  * (Button·Input·FormField·Logo·StatusBanner)가 전부 번들에 있다.
  * 새 시각 클래스는 하나도 만들지 않는다 — 디자인 결정은 @axe/ui 한 곳에서만 한다.
  */
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { describe } from "../lib/api.ts";
 import { CLASSIC_ORIGIN } from "../lib/classic.ts";
 import { PROVIDER_LABELS, TwoFactorRequiredError, PROVIDER_AUTHENTICATOR, twoFactorRejection } from "../lib/auth.ts";
-import { beginSso, describeSsoFailure, type SsoHandoff } from "../lib/sso.ts";
+import { beginSso, claimAutoSso, describeSsoFailure, type SsoHandoff } from "../lib/sso.ts";
 import { SDK_VERSION } from "../sdk.ts";
 import { ServiceSwitcher } from "./ServiceSwitcher.tsx";
 
@@ -169,7 +169,10 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
   const [error, setError] = useState<string | null>(null);
   const [ssoBusy, setSsoBusy] = useState(false);
   const [ssoError, setSsoError] = useState<string | null>(null);
+  /** 이메일+마스터 패스워드 폼이 펼쳐져 있는가. 기본 경로가 SSO 라 접힌 채로 시작한다. */
+  const [manual, setManual] = useState(false);
   const codeRef = useRef<HTMLInputElement>(null);
+  const autoStarted = useRef(false);
 
   // 2FA 단계로 넘어가면 코드 칸으로 초점을 옮긴다 — 손이 멈추지 않게.
   useEffect(() => {
@@ -201,6 +204,9 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
   /**
    * SSO 시작. prevalidate 가 성공해야만 이동한다 — SSO 가 꺼져 있거나 서버가 응답하지
    * 않으면 여기서 갈라져 화면에 사유가 남는다(빈 화면으로 튕기지 않는다).
+   *
+   * 실패하면 폼을 펼친다: 신원 단계가 막힌 순간 남는 유일한 길이 마스터 패스워드이고
+   * (D-ops-27 의 비상 경로), 그걸 한 번 더 눌러 찾게 만들 이유가 없다.
    */
   async function startSso() {
     setSsoBusy(true);
@@ -210,15 +216,35 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
     } catch (err) {
       setSsoError(describeSsoFailure(err) ?? describe(err));
       setSsoBusy(false);
+      setManual(true);
     }
   }
+
+  /**
+   * **진입 즉시 SSO.** 이 서버에서 신원 단계는 사용자 입력이 필요 없다(prevalidate 는
+   * 무인증으로 ssoToken 을 준다) — 이미 Entra 에 로그인한 사용자는 이 화면을 보지 않고
+   * 마스터 패스워드 단계로 곧장 간다. 서비스 전환기에서 넘어왔든 주소로 들어왔든 같다.
+   *
+   * `claimAutoSso` 가 탭당 1회로 묶는다(루프 차단 — 그 함수 주석 참조). 청구에 실패하면
+   * 아무 일도 하지 않는다: SSO 버튼과 폼이 그대로 있는 평소 화면이다.
+   *
+   * effect 가 아니라 layout effect 인 이유는 한 프레임 때문이다 — 자동 시도를 하지 않는
+   * 진입(로그아웃 직후 등)에서 "이동 중" 상태가 칠해졌다 사라지는 깜빡임을 없앤다.
+   * StrictMode 의 이중 실행은 ref 로 막는다 (SsoScreen 의 교환과 같은 방식).
+   */
+  useLayoutEffect(() => {
+    if (autoStarted.current) return;
+    autoStarted.current = true;
+    if (claimAutoSso()) void startSso();
+    // 마운트 1회.
+  }, []);
 
   return (
     <AuthShell
       heading="금고 열기"
       lead="AXE 계정으로 인증하고, 마스터 패스워드로 이 브라우저에서 직접 복호합니다."
     >
-      <form className="axe-pattern-auth__form" onSubmit={submit}>
+      <div className="axe-pattern-auth__form">
         {/* 새로고침으로 되살린 세션이 서버에 거부됐을 때만 뜬다 — 왜 잠금 화면이 아니라
             로그인 화면으로 왔는지 말해 주지 않으면 사용자는 이유를 알 길이 없다. */}
         {notice && (
@@ -226,7 +252,7 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
         )}
 
         <button
-          className={`axe-btn axe-btn--secondary axe-btn--lg axe-pattern-auth__provider${ssoBusy ? " axe-btn--loading" : ""}`}
+          className={`axe-btn axe-btn--primary axe-btn--lg axe-pattern-auth__provider${ssoBusy ? " axe-btn--loading" : ""}`}
           type="button"
           onClick={startSso}
           disabled={ssoBusy || busy}
@@ -243,9 +269,28 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
         </p>
 
         <div className="axe-pattern-auth__divider">
-          <span>또는 이메일로</span>
+          <span>또는</span>
         </div>
 
+        {/*
+          비상구는 항상 눌린다 — 자동 시도가 도는 중에도 그렇다. 이 앱의 fetch 에는
+          타임아웃이 없으므로(ResumeScreen 의 `onCancel` 과 같은 이유), 응답 없는
+          prevalidate 가 이 화면을 막다른 길로 만들면 안 된다.
+        */}
+        <button
+          className="axe-btn axe-btn--ghost axe-pattern-auth__email-action"
+          type="button"
+          aria-expanded={manual}
+          // 접혀 있을 때 폼은 DOM 에 없다 — 없는 id 를 가리키지 않는다.
+          aria-controls={manual ? "manual-signin" : undefined}
+          onClick={() => setManual((v) => !v)}
+        >
+          다른 방법으로 로그인
+        </button>
+      </div>
+
+      {manual && (
+      <form id="manual-signin" className="axe-pattern-auth__form" onSubmit={submit}>
         <div className="axe-form-field">
           <label className="axe-label axe-form-field__label" htmlFor="email">
             이메일
@@ -320,8 +365,9 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
 
         {error && <StatusBanner tone="error" title="로그인 실패" description={error} />}
 
+        {/* 기본 행동은 이제 SSO 다 — 화면에 primary 는 하나만 선다. */}
         <button
-          className={`axe-btn axe-btn--primary axe-btn--lg axe-pattern-auth__email-action${busy ? " axe-btn--loading" : ""}`}
+          className={`axe-btn axe-btn--secondary axe-btn--lg axe-pattern-auth__email-action${busy ? " axe-btn--loading" : ""}`}
           type="submit"
           disabled={busy || ssoBusy || (!!providers && !codeSupported)}
           aria-busy={busy}
@@ -329,6 +375,7 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
           {busy ? "여는 중…" : providers ? "코드 확인하고 열기" : "금고 열기"}
         </button>
       </form>
+      )}
 
       <p className="axe-pattern-auth__privacy">
         어느 경로로 들어오든 금고를 여는 것은 마스터 패스워드입니다. 이 서버는 SSO 를 <em>인증</em>에만
