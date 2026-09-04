@@ -30,8 +30,9 @@ export interface PlatformService {
 export const platformServices: PlatformService[] = [
   { key: "blueprint", label: "Blueprint", detail: "AI 네이티브 워크스페이스", href: "https://axelabs.ai" },
   { key: "gate", label: "Gate", detail: "전자결재와 전자계약", href: "https://gate.axelabs.ai" },
+  { key: "hive", label: "Hive", detail: "인사·급여·평가", href: "https://axe.axelabs.ai/hive" },
   { key: "layer", label: "Layer", detail: "커뮤니케이션 통한 온보딩", href: "https://layer.axelabs.ai" },
-  { key: "frame", label: "Frame", detail: "회계 관리와 회계사 협업", href: "https://docs.axelabs.ai/services/frame" },
+  { key: "frame", label: "Frame", detail: "회계 관리와 회계사 협업", href: "https://axe.axelabs.ai/frame" },
   { key: "cortex", label: "Cortex", detail: "이해관계자 네트워크 관리", href: "https://cortex.axelabs.ai" },
   { key: "index", label: "Index", detail: "투자 기회 심사 및 자산 관리", href: "https://index.axelabs.ai" },
   { key: "matrix", label: "Matrix", detail: "통합 관제 시스템", href: "https://matrix.axelabs.ai" },
