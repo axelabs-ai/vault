@@ -1,14 +1,14 @@
 {
   "schema": "@axe/ui/consumer-lock@1",
-  "uiVersion": "0.36.0",
-  "providerCommit": "28fcd5aa2bb42e9e7bc2a8d2db3a1834468a52bf",
-  "profile": "core-data",
+  "uiVersion": "0.39.0",
+  "providerCommit": "14ead07967f0872d36c14162922fba66041dcb8b",
+  "profile": "full",
   "compatibility": "modern",
   "assetBase": "fonts",
-  "contentSha256": "ff27964ef33448405efd77ed5833266fa495a6ebf1e03c8e7eaf2c06d09cf344",
+  "contentSha256": "d7f56792109f31b2cd6963a9f6e5ab994021faf96b560ed73a798fd7e9eac3a2",
   "cssContract": {
-    "count": 555,
-    "sha256": "8f436ee650c8a74669e0d2c67937071bf6980ec5f999c081cdbb4b3854bd324e"
+    "count": 954,
+    "sha256": "5e73cd055adc1a618b99b8914e9f3ddd2bf9a27797b5cb8a0d6400a7f76aa3a7"
   },
   "referencedFonts": [
     "SarasaFixedK-Regular.woff2",
@@ -113,38 +113,38 @@
     },
     {
       "path": "VERSION",
-      "bytes": 206,
-      "sha256": "f9f2b0336c33443da4d368168dcdef9c394434e10522a2b825d40ef342b0d40c"
+      "bytes": 201,
+      "sha256": "15ccc5deeeda53aab09643850c15b206c8a2dc4acff48aa4ec1df420187d3852"
     },
     {
       "path": "axe-ui.css",
-      "bytes": 332050,
-      "sha256": "ed8d1cf84a579c022be5b613f9972305cfb83d312e337e528381767ddfdada50"
+      "bytes": 563554,
+      "sha256": "994c4b5aba2c6d24624b7d5820c535ffa1f7e7ecd975f01cc4362d960fe42f63"
     },
     {
       "path": "contracts/context-panel/contract.v1.json",
-      "bytes": 27763,
-      "sha256": "4d42df3ea7af95f80a36d350aeb4ab6b37b6b9d778084710b616a60a835745e5"
+      "bytes": 45149,
+      "sha256": "5820cfaa98d9695c9fe09640915ba89d37309d6e23c34e30888b8baa2c678277"
     },
     {
       "path": "contracts/context-panel/golden/copy-no-subject-drawer.txt",
-      "bytes": 567,
-      "sha256": "c643b2f3f895484d60f0f1716b3767c4b303ac399ba0bc2fdc2a9a87ebc1d78d"
+      "bytes": 765,
+      "sha256": "636679dd38e2f9a2d27c3b02953bb13df2b1bfb05f5be7957948d7734c5c450e"
     },
     {
       "path": "contracts/context-panel/golden/copy-no-subject-toc.txt",
-      "bytes": 567,
-      "sha256": "c643b2f3f895484d60f0f1716b3767c4b303ac399ba0bc2fdc2a9a87ebc1d78d"
+      "bytes": 765,
+      "sha256": "636679dd38e2f9a2d27c3b02953bb13df2b1bfb05f5be7957948d7734c5c450e"
     },
     {
       "path": "contracts/context-panel/golden/copy-ready-drawer.txt",
-      "bytes": 784,
-      "sha256": "c0a68efebab08f1104dc5d7bca4d124503535685914f3b0216475e5d2c52f00d"
+      "bytes": 981,
+      "sha256": "c7fa270715dc63f60f1667a67f38ff3c50b1a101b26785117e8375dbfbafb4e1"
     },
     {
       "path": "contracts/context-panel/golden/copy-ready-toc.txt",
-      "bytes": 784,
-      "sha256": "c0a68efebab08f1104dc5d7bca4d124503535685914f3b0216475e5d2c52f00d"
+      "bytes": 981,
+      "sha256": "c7fa270715dc63f60f1667a67f38ff3c50b1a101b26785117e8375dbfbafb4e1"
     },
     {
       "path": "contracts/context-panel/golden/copy-unavailable-drawer.txt",

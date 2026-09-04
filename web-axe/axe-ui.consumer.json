@@ -3,5 +3,5 @@
   "out": "src/axe-ui",
   "assetBase": "fonts",
   "compatibility": "modern",
-  "profile": "core-data"
+  "profile": "full"
 }
