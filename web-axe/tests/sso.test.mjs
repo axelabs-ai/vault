@@ -12,9 +12,10 @@
  * 이 파일에서 깐다. crypto.subtle 은 Node 것을 그대로 쓴다 — SHA-256 을 우리가 흉내내면
  * 검증의 의미가 사라진다.
  */
-import { test, before } from "node:test";
+import { test, before, mock } from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 const ORIGIN = "https://vault.axelabs.ai";
 
@@ -340,5 +341,113 @@ test("표식을 남기지 못하는 저장소에서는 자동 시작하지 않�
     assert.equal(sso.claimAutoSso(), false);
   } finally {
     globalThis.sessionStorage = real;
+  }
+});
+
+// -------------------------------------- 자동 SSO 의 시한·포기 (막다른 로그인 화면 차단)
+//
+// 왜 이것들인가 — 자동 시도는 사용자가 누른 적이 없는데도 화면 전체를 인질로 잡을 수 있어서다.
+// 이 앱의 fetch 에는 타임아웃이 없으므로, 응답 없는 prevalidate 에 매달린 시도는 영원히 끝나지
+// 않는다. 그 상태에서 마스터 패스워드 경로까지 잠기면 D-ops-27 의 비상구가 함께 막힌다.
+
+/** 결과를 순서대로 받아 적는 시도 하나. `settle` 로 begin 의 결말을 시험이 정한다. */
+function attempt(opts = {}) {
+  const seen = [];
+  let settle;
+  const abandon = sso.ssoAttempt(
+    () => new Promise((resolve, reject) => (settle = { resolve, reject })),
+    {
+      go: (url) => seen.push(`go:${url}`),
+      fail: () => seen.push("fail"),
+      ...(opts.timed ? { timeout: () => seen.push("timeout") } : {}),
+    },
+  );
+  return { seen, abandon, resolve: (url) => settle.resolve(url), reject: (e) => settle.reject(e) };
+}
+
+/** then 콜백은 마이크로태스크라 한 번 양보해야 관측된다. */
+const flush = () => new Promise((r) => setImmediate(r));
+
+test("자동 시도가 매달리면 시한에 손을 뗀다 (폼이 비상구로 남는다)", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const a = attempt({ timed: true });
+    mock.timers.tick(sso.AUTO_SSO_TIMEOUT_MS - 1);
+    assert.deepEqual(a.seen, [], "시한 전에 포기하면 정상 로그인이 끊긴다");
+    mock.timers.tick(1);
+    assert.deepEqual(a.seen, ["timeout"], "시한이 지나도 안 놓으면 화면이 막다른 길이 된다");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("시한 뒤 늦게 도착한 응답은 사용자를 끌고 가지 않는다", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  let a;
+  try {
+    a = attempt({ timed: true });
+    mock.timers.tick(sso.AUTO_SSO_TIMEOUT_MS);
+    assert.deepEqual(a.seen, ["timeout"]);
+  } finally {
+    mock.timers.reset();
+  }
+  // 폼을 쓰고 있는 사람을 뒤늦게 Entra 로 보내면 입력하던 마스터 패스워드가 사라진다.
+  a.resolve("https://idp.example/authorize");
+  await flush();
+  assert.deepEqual(a.seen, ["timeout"], "포기한 뒤의 성공은 무시돼야 한다");
+});
+
+test("포기한 시도는 나중에 성공해도 이동하지 않는다 (폼으로 갈아탄 순간)", async () => {
+  const a = attempt({ timed: true });
+  a.abandon(); // = 화면이 "다른 방법으로 로그인" 을 펼치거나 폼을 제출한 순간
+  a.resolve("https://idp.example/authorize");
+  await flush();
+  assert.deepEqual(a.seen, [], "이동도 에러 배너도 남기지 않는다 — 사용자가 이미 다른 길을 골랐다");
+});
+
+test("포기한 시도는 나중에 실패해도 화면을 건드리지 않는다", async () => {
+  const a = attempt({ timed: true });
+  a.abandon();
+  a.reject(new Error("prevalidate 실패"));
+  await flush();
+  assert.deepEqual(a.seen, []);
+});
+
+test("결말은 하나뿐이다 — 성공한 시도에는 시한이 오지 않는다", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const a = attempt({ timed: true });
+    a.resolve("https://idp.example/authorize");
+    await flush();
+    assert.deepEqual(a.seen, ["go:https://idp.example/authorize"]);
+    mock.timers.tick(sso.AUTO_SSO_TIMEOUT_MS * 2);
+    assert.deepEqual(a.seen, ["go:https://idp.example/authorize"], "시한이 뒤늦게 화면을 되돌리면 안 된다");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("사용자가 누른 시도(timeout 핸들러 없음)에는 시한을 걸지 않는다", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const a = attempt(); // timed 아님
+    mock.timers.tick(sso.AUTO_SSO_TIMEOUT_MS * 10);
+    assert.deepEqual(a.seen, [], "기다리는 것은 그 사람의 선택이다 — 임의로 끊지 않는다");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("회귀: 마스터 패스워드 제출은 SSO 진행 상태로 잠기지 않는다 (D-ops-27 비상 경로)", () => {
+  // 화면(.tsx)은 Node 에서 실행할 수 없으므로 조건식 자체를 못 박는다. 여기가 다시 ssoBusy 를
+  // 보게 되면, 매달린 자동 SSO 가 비상구까지 잠그던 그 상태로 돌아간다.
+  const src = readFileSync(new URL("../src/ui/AuthScreens.tsx", import.meta.url), "utf8");
+  const start = src.indexOf('<form id="manual-signin"');
+  assert.ok(start > 0, "수동 로그인 폼을 찾지 못했다 — 앵커가 바뀌었나");
+  const form = src.slice(start, src.indexOf("</form>", start));
+  const conds = [...form.matchAll(/disabled=\{([^}]*)\}/g)].map((m) => m[1]);
+  assert.ok(conds.length > 0, "제출 버튼의 disabled 조건을 찾지 못했다");
+  for (const cond of conds) {
+    assert.ok(!/ssoBusy/.test(cond), `제출이 SSO 진행 상태로 잠긴다: disabled={${cond}}`);
   }
 });

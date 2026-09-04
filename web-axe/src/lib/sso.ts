@@ -258,6 +258,61 @@ export function claimAutoSso(): boolean {
   }
 }
 
+/**
+ * 자동 개시 SSO 의 시한(ms).
+ *
+ * 이 앱의 fetch 에는 어디에도 타임아웃이 없다(ResumeScreen 의 `onCancel` 과 같은 사정).
+ * 사용자가 아무것도 누르지 않았는데 시작된 시도가 응답 없는 prevalidate 에 매달리면 화면은
+ * "이동 중" 인 채로 굳고, 그와 함께 **비상 경로(마스터 패스워드, D-ops-27)까지 잠긴다**.
+ * 그래서 자동 개시에만 시한을 건다 — 사용자가 직접 누른 시도는 기다리는 것이 그 사람의 선택이다.
+ */
+export const AUTO_SSO_TIMEOUT_MS = 8000;
+
+export interface SsoAttemptHandlers {
+  /** prevalidate 가 끝났다 — 이 URL 로 이동한다. */
+  go: (url: string) => void;
+  fail: (err: unknown) => void;
+  /** 주면 시한을 건다(자동 개시). 주지 않으면 시한 없이 기다린다. */
+  timeout?: () => void;
+}
+
+/**
+ * SSO 시도 하나의 수명. 돌려주는 함수를 부르면 **포기**한다 — 그 뒤에 도착하는 성공·실패·시한은
+ * 전부 무시된다. 세 결과는 서로 배타적이다(먼저 온 하나만 실행된다).
+ *
+ * 포기가 필요한 이유는 늦게 온 성공이 손을 낚아채기 때문이다: 마스터 패스워드 폼으로 갈아탄
+ * 사람을 뒤늦게 Entra 로 끌고 가면 입력하던 것이 그대로 사라진다.
+ *
+ * 화면(.tsx)이 아니라 여기 있는 이유는 이 규칙이 검증 가능해야 해서다 — 시한·포기의 배타성은
+ * 이 함수 하나로 테스트되고, 화면은 콜백만 묶는다.
+ */
+export function ssoAttempt(
+  begin: () => Promise<string>,
+  on: SsoAttemptHandlers,
+  ms: number = AUTO_SSO_TIMEOUT_MS,
+): () => void {
+  let live = true;
+  const timer = on.timeout ? setTimeout(() => settle() && on.timeout!(), ms) : undefined;
+
+  function settle(): boolean {
+    if (!live) return false;
+    live = false;
+    if (timer !== undefined) clearTimeout(timer);
+    return true;
+  }
+
+  void begin().then(
+    (url) => {
+      if (settle()) on.go(url);
+    },
+    (err) => {
+      if (settle()) on.fail(err);
+    },
+  );
+
+  return () => void settle();
+}
+
 /** 부팅 1회. 판정과 동시에 핸드셰이크를 소비(제거)해 재사용·재생을 막는다. */
 export function takeSsoRoute(hash: string): SsoRoute {
   let stored = { state: null as string | null, verifier: null as string | null };

@@ -10,7 +10,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type Reac
 import { describe } from "../lib/api.ts";
 import { CLASSIC_ORIGIN } from "../lib/classic.ts";
 import { PROVIDER_LABELS, TwoFactorRequiredError, PROVIDER_AUTHENTICATOR, twoFactorRejection } from "../lib/auth.ts";
-import { beginSso, claimAutoSso, describeSsoFailure, type SsoHandoff } from "../lib/sso.ts";
+import { beginSso, claimAutoSso, describeSsoFailure, ssoAttempt, type SsoHandoff } from "../lib/sso.ts";
 import { SDK_VERSION } from "../sdk.ts";
 import { ServiceSwitcher } from "./ServiceSwitcher.tsx";
 
@@ -19,6 +19,12 @@ import { ServiceSwitcher } from "./ServiceSwitcher.tsx";
  * 2026-08-14 컷오버로 루트(`/`)는 이 앱이 됐다. 스톡 볼트는 별도 호스트로 옮겨졌다.
  */
 const STOCK_VAULT_URL = CLASSIC_ORIGIN;
+
+/**
+ * 자동 시도가 시한 안에 응답을 받지 못했을 때. 사실만 말하고 다음 손을 가리킨다 —
+ * 이 문구가 뜬 화면에서는 마스터 패스워드 폼이 이미 펼쳐져 있다.
+ */
+const SSO_TIMEOUT_NOTICE = "응답이 없어 자동 로그인을 멈췄습니다 — 마스터 패스워드로 여세요.";
 
 function StatusBanner({ tone, title, description }: { tone: "error" | "info"; title: string; description?: ReactNode }) {
   return (
@@ -173,6 +179,8 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
   const [manual, setManual] = useState(false);
   const codeRef = useRef<HTMLInputElement>(null);
   const autoStarted = useRef(false);
+  /** 진행 중 SSO 시도를 포기하는 손잡이 (없으면 진행 중인 시도가 없다). */
+  const abandonSso = useRef<(() => void) | null>(null);
 
   // 2FA 단계로 넘어가면 코드 칸으로 초점을 옮긴다 — 손이 멈추지 않게.
   useEffect(() => {
@@ -181,8 +189,21 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
 
   const codeSupported = !providers || providers.includes(PROVIDER_AUTHENTICATOR);
 
+  /**
+   * 진행 중인 SSO 시도를 포기한다. 마스터 패스워드로 갈아탄 순간에 부른다 — 안 부르면 늦게
+   * 도착한 prevalidate 응답이 `location.assign` 으로 사용자를 Entra 로 끌고 가서, 방금 연
+   * 금고든 입력하던 패스워드든 함께 사라진다.
+   */
+  function dropSso() {
+    if (!abandonSso.current) return;
+    abandonSso.current();
+    abandonSso.current = null;
+    setSsoBusy(false);
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
+    dropSso();
     setBusy(true);
     setError(null);
     const submitted = providers ? code : undefined;
@@ -207,17 +228,31 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
    *
    * 실패하면 폼을 펼친다: 신원 단계가 막힌 순간 남는 유일한 길이 마스터 패스워드이고
    * (D-ops-27 의 비상 경로), 그걸 한 번 더 눌러 찾게 만들 이유가 없다.
+   *
+   * `auto` = 사용자가 누르지 않은 시도. 이때만 시한을 건다 — 응답이 없으면 매달린 채로
+   * 굳는 대신 폼을 펼치고 사유를 남긴다. 버튼으로 시작한 시도는 기다리는 쪽이 사용자의
+   * 선택이므로 시한 없이 둔다(그동안에도 폼은 펼칠 수 있고 제출도 막히지 않는다).
    */
-  async function startSso() {
+  function startSso(auto = false) {
     setSsoBusy(true);
     setSsoError(null);
-    try {
-      location.assign(await beginSso());
-    } catch (err) {
-      setSsoError(describeSsoFailure(err) ?? describe(err));
-      setSsoBusy(false);
-      setManual(true);
-    }
+    abandonSso.current = ssoAttempt(beginSso, {
+      go: (url) => location.assign(url),
+      fail: (err) => {
+        abandonSso.current = null;
+        setSsoError(describeSsoFailure(err) ?? describe(err));
+        setSsoBusy(false);
+        setManual(true);
+      },
+      timeout: auto
+        ? () => {
+            abandonSso.current = null;
+            setSsoError(SSO_TIMEOUT_NOTICE);
+            setSsoBusy(false);
+            setManual(true);
+          }
+        : undefined,
+    });
   }
 
   /**
@@ -235,7 +270,7 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
   useLayoutEffect(() => {
     if (autoStarted.current) return;
     autoStarted.current = true;
-    if (claimAutoSso()) void startSso();
+    if (claimAutoSso()) startSso(true);
     // 마운트 1회.
   }, []);
 
@@ -254,7 +289,7 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
         <button
           className={`axe-btn axe-btn--primary axe-btn--lg axe-pattern-auth__provider${ssoBusy ? " axe-btn--loading" : ""}`}
           type="button"
-          onClick={startSso}
+          onClick={() => startSso()}
           disabled={ssoBusy || busy}
           aria-busy={ssoBusy}
         >
@@ -276,6 +311,10 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
           비상구는 항상 눌린다 — 자동 시도가 도는 중에도 그렇다. 이 앱의 fetch 에는
           타임아웃이 없으므로(ResumeScreen 의 `onCancel` 과 같은 이유), 응답 없는
           prevalidate 가 이 화면을 막다른 길로 만들면 안 된다.
+
+          펼치는 순간 진행 중인 SSO 시도를 포기한다: 여는 것과 동시에 폼이 실제로 쓸 수
+          있는 상태가 돼야 하고(제출 버튼은 ssoBusy 를 보지 않는다), 그 뒤에 응답이 와서
+          사용자를 Entra 로 끌고 가면 그 폼은 헛것이 된다.
         */}
         <button
           className="axe-btn axe-btn--ghost axe-pattern-auth__email-action"
@@ -283,7 +322,10 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
           aria-expanded={manual}
           // 접혀 있을 때 폼은 DOM 에 없다 — 없는 id 를 가리키지 않는다.
           aria-controls={manual ? "manual-signin" : undefined}
-          onClick={() => setManual((v) => !v)}
+          onClick={() => {
+            if (!manual) dropSso();
+            setManual((v) => !v);
+          }}
         >
           다른 방법으로 로그인
         </button>
@@ -365,11 +407,14 @@ export function LoginScreen({ onSignIn, notice }: LoginScreenProps) {
 
         {error && <StatusBanner tone="error" title="로그인 실패" description={error} />}
 
-        {/* 기본 행동은 이제 SSO 다 — 화면에 primary 는 하나만 선다. */}
+        {/* 기본 행동은 이제 SSO 다 — 화면에 primary 는 하나만 선다.
+            ⚠ `ssoBusy` 로 잠그지 않는다: 이 폼이 D-ops-27 의 비상 경로이고, 응답 없는
+            SSO 시도가 그 경로를 같이 잠그면 화면이 막다른 길이 된다. 진행 중이던 시도는
+            폼을 펼칠 때와 제출할 때 포기되므로(`dropSso`) 두 경로가 겹치지도 않는다. */}
         <button
           className={`axe-btn axe-btn--secondary axe-btn--lg axe-pattern-auth__email-action${busy ? " axe-btn--loading" : ""}`}
           type="submit"
-          disabled={busy || ssoBusy || (!!providers && !codeSupported)}
+          disabled={busy || (!!providers && !codeSupported)}
           aria-busy={busy}
         >
           {busy ? "여는 중…" : providers ? "코드 확인하고 열기" : "금고 열기"}
