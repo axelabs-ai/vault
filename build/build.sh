@@ -27,7 +27,7 @@ set -euo pipefail
 
 # ---------------- defaults ----------------
 TIMSHEL_REPO="${TIMSHEL_REPO:-https://github.com/Timshel/OIDCWarden.git}"
-TIMSHEL_REF="${TIMSHEL_REF:-9214b378f072}"   # v2026.7.0-1
+TIMSHEL_REF="${TIMSHEL_REF:-1bed3a1868bc}"   # v2026.8.0-1 (vaultwarden fa2566d1 까지 = 1.37.2 상당; 클라이언트 2026.8+ 필수 — 2026-09-05 r5)
 DB="${DB:-sqlite}"
 CARGO_PROFILE="${CARGO_PROFILE:-release-low}"
 IMAGE_TAG="${IMAGE_TAG:-axelabs-ai/vault:dev}"
